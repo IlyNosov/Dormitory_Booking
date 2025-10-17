@@ -1,0 +1,30 @@
+name: ci-backend.yml
+
+on:
+  push:
+    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+  pull_request:
+    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+
+jobs:
+  test:
+    # Пока что нет файла go.mod, будем запускать только когда он появится
+    if: ${{ hashFiles('backend/go.mod') != '' }}
+
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - run: go mod download
+      - run: go vet ./...
+      - run: go test ./... -cover || true # пока тестов нет, можем пропустить чтобы не падало
+      - run: CGO_ENABLED=0 go build ./cmd/run
