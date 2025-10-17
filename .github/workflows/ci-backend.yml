@@ -8,9 +8,6 @@ on:
 
 jobs:
   test:
-    # Пока что нет файла go.mod, будем запускать только когда он появится
-    if: ${{ hashFiles('backend/go.mod') != '' }}
-
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,12 +16,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect go.mod
+        id: gate
+        run: |
+          if [ -f backend/go.mod ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+        working-directory: .
+
       - name: Setup Go
+        if: steps.gate.outputs.present == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
 
-      - run: go mod download
-      - run: go vet ./...
-      - run: go test ./... -cover || true # пока тестов нет, можем пропустить чтобы не падало
-      - run: CGO_ENABLED=0 go build ./cmd/run
+      - if: steps.gate.outputs.present == 'true'
+        run: go mod download
+
+      - if: steps.gate.outputs.present == 'true'
+        run: go vet ./...
+
+      - if: steps.gate.outputs.present == 'true'
+        run: go test ./... -cover || true
+
+      - name: Build
+        if: steps.gate.outputs.present == 'true'
+        run: CGO_ENABLED=0 go build ./cmd/run
+
+      - name: Skip (no backend yet)
+        if: steps.gate.outputs.present != 'true'
+        run: echo "No backend/go.mod — skipping backend checks."
