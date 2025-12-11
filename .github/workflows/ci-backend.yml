@@ -23,11 +23,6 @@ jobs:
           POSTGRES_PASSWORD: booking
         ports:
           - "5432:5432"
-        options: >-
-          --health-cmd="pg_ready -U booking -d booking"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
 
     env:
       TEST_DB_URL: postgres://booking:booking@localhost:5432/booking?sslmode=disable
