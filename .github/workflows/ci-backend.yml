@@ -1,50 +1,79 @@
-name: ci-backend.yml
+name: Backend CI
 
 on:
   push:
-    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
   pull_request:
-    paths: ["backend/**", ".github/workflows/ci-backend.yml"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
 
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: booking
+          POSTGRES_USER: booking
+          POSTGRES_PASSWORD: booking
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd="pg_ready -U booking -d booking"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      TEST_DB_URL: postgres://booking:booking@localhost:5432/booking?sslmode=disable
+
     defaults:
       run:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Detect go.mod
-        id: gate
-        run: |
-          if [ -f backend/go.mod ]; then
-            echo "present=true" >> $GITHUB_OUTPUT
-          else
-            echo "present=false" >> $GITHUB_OUTPUT
-          fi
-        working-directory: .
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        if: steps.gate.outputs.present == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: backend/go.mod
 
-      - if: steps.gate.outputs.present == 'true'
+      - name: Cache Go modules
+        uses: actions/cache@v4
+
+      - name: Download dependencies
         run: go mod download
 
-      - if: steps.gate.outputs.present == 'true'
+      - name: Wait for Postgres and run migrations
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+          echo "Waiting for Postgres to be ready..."
+          for i in {1..10}; do
+            if PGPASSWORD=booking psql -h localhost -U booking -d booking -c "SELECT 1" >/dev/null 2>&1; then
+              echo "Postgres is up"
+              break
+            fi
+            echo "Postgres is not ready yet, retrying..."
+            sleep 3
+          done
+
+          echo "Running migrations..."
+          PGPASSWORD=booking psql -h localhost -U booking -d booking -f deploy/migrations/001_init.sql
+
+      - name: Go vet
         run: go vet ./...
 
-      - if: steps.gate.outputs.present == 'true'
-        run: go test ./... -cover || true
+      - name: Run tests
+        run: go test ./... -cover
 
-      - name: Build
-        if: steps.gate.outputs.present == 'true'
+      - name: Build binary
         run: CGO_ENABLED=0 go build ./cmd/run
-
-      - name: Skip (no backend yet)
-        if: steps.gate.outputs.present != 'true'
-        run: echo "No backend/go.mod — skipping backend checks."
