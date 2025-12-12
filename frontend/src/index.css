@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+    --d-bg: #1e1f22;      /* фон */
+    --d-card: #2b2d31;    /* карточки */
+    --d-panel:#26282b;    /* панели */
+    --d-border:#3a3c41;   /* бордеры */
+}
+
+:root {
+    --d-bg-soft: rgba(30, 31, 34, 0.7);
+}
+
+html.modal-open { overflow: hidden; }
+
+html { scrollbar-gutter: stable; }
+
+.wheel-no-scrollbar { scrollbar-width: none; overscroll-behavior: contain; }
+.wheel-no-scrollbar::-webkit-scrollbar { display:none; }
+.wheel-capture {
+    overscroll-behavior: contain;
+    touch-action: none;
+    scroll-snap-type: y mandatory;
+    scroll-snap-stop: always;
+    scroll-behavior: smooth;
+}
+.tnum { font-variant-numeric: tabular-nums; }
+
+@layer components {
+    .btn {
+        @apply inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all
+        dark:text-zinc-100
+        focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60;
+    }
+    .btn-primary { @apply border-blue-400/60 text-blue-700 dark:text-blue-300 ring-1 ring-blue-400/50; }
+    .btn-active  { @apply border-blue-400/60 text-blue-700 dark:text-blue-300 ring-1 ring-blue-400/50; }
+
+    .field {
+        @apply rounded-xl border px-3 py-2 text-sm
+        bg-white/80 text-zinc-900 border-zinc-300/60
+        dark:text-zinc-100
+        focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60;
+    }
+    .lbl { @apply text-xs uppercase tracking-wide text-zinc-600 dark:text-zinc-400; }
+
+    .card {
+        @apply rounded-2xl border border-zinc-200/70 bg-white/80 p-3 transition-all
+        hover:-translate-y-[2px] hover:shadow-lg;
+    }
+
+    .icon-btn {
+        @apply inline-flex items-center justify-center rounded-lg p-1.5 transition-colors
+        hover:bg-zinc-100 dark:hover:bg-black/20
+        focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60;
+    }
+
+    .badge-pub  { @apply bg-zinc-100 text-zinc-800 dark:bg-black/30 dark:text-zinc-50; }
+    .badge-priv { @apply bg-zinc-900 text-zinc-100 dark:bg-zinc-100 dark:text-zinc-900; }
+
+    .switch      { @apply relative inline-flex h-6 w-11 items-center rounded-full bg-emerald-200/70 dark:bg-emerald-900/40 transition-all; }
+    .switch::after { content:""; @apply inline-block h-5 w-5 transform rounded-full bg-white dark:bg-zinc-200 translate-x-1 transition; box-shadow:0 1px 2px rgba(0,0,0,.25); }
+    .switch-on   { @apply bg-rose-300/70 dark:bg-rose-900/40; }
+    .switch-on::after { transform: translateX(1.5rem); }
+
+    .pattern { transition: transform 500ms cubic-bezier(.2,.65,.3,1), opacity 500ms; }
+
+    .fade-wrap { animation: fadeIn .22s ease-out; }
+}
+
+.dark .btn {
+    background-color: var(--d-card);
+    border-color: var(--d-border);
+}
+
+.dark .field {
+    background-color: var(--d-panel);
+    border-color: var(--d-border);
+}
+
+.dark .card {
+    background-color: var(--d-card);
+    border-color: var(--d-border);
+}
+
+.dark header.sticky {
+    background-color: var(--d-bg-soft);
+    border-bottom-color: var(--d-border);
+}
+
+@keyframes fadeIn {
+    from { opacity:.0; transform: translateY(2px);}
+    to   { opacity:1;  transform:none; }
+}
+
+.mask-soft {
+    mask-image: linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+}
+
+.now-line.smooth {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent 0%, transparent 100%);
+    filter: drop-shadow(0 0 6px rgba(96,165,250,.35));
+    background-size: 220% 100%;
+    animation: shimmer 4s linear infinite;
+}
+@keyframes shimmer {
+    0%   { background-position: 0% 0; }
+    100% { background-position: -200% 0; }
+}
+
+
+html, body, #root {
+    height: 100%;
+    background: var(--d-bg);
+}
+
+body {
+    margin: 0;
+    overflow-x: hidden;
+    overscroll-behavior: none;
+}

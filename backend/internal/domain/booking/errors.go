@@ -3,14 +3,14 @@ package booking
 import "errors"
 
 var (
-	ErrNotFound      = errors.New("booking not found")
-	ErrOverlap       = errors.New("booking overlaps with existing one")
-	ErrInvalidPeriod = errors.New("end must be after start")
-	ErrForbidden     = errors.New("operation is not allowed for this user")
-	ErrInvalidRoom   = errors.New("invalid room number")
-
-	ErrInvalidTime         = errors.New("booking is not allowed at this time")
-	ErrPrivateDailyLimit   = errors.New("private bookings daily limit exceeded")
-	ErrPrivateEveningLimit = errors.New("private evening bookings limit exceeded")
-	ErrTooLongDuration     = errors.New("booking duration exceeds maximum allowed")
+	ErrNotFound            = errors.New("Бронь не найдена.")
+	ErrOverlap             = errors.New("Бронь пересекается с существующей.")
+	ErrInvalidPeriod       = errors.New("Время окончания должно быть позже времени начала.")
+	ErrForbidden           = errors.New("Операция запрещена для этого пользователя.")
+	ErrInvalidRoom         = errors.New("Недопустимый номер комнаты.")
+	ErrInPast              = errors.New("Нельзя создавать бронь в прошлом.")
+	ErrInvalidTime         = errors.New("Бронирование не разрешено в это время.")
+	ErrPrivateDailyLimit   = errors.New("Превышен суточный лимит частных бронирований.")
+	ErrPrivateEveningLimit = errors.New("Превышен вечерний лимит частных бронирований.")
+	ErrTooLongDuration     = errors.New("Длительность бронирования превышает максимально допустимую.")
 )

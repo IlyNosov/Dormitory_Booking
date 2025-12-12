@@ -1,10 +1,15 @@
 package booking
 
-// В этом файле простые функции валидации. Они завязаны только на Booking и не требуют внешних зависимостей.
+import "time"
+
+// В этом файле простые функции валидации.
 
 func (b Booking) ValidateBasic() error {
 	if !IsValidRoom(b.Room) {
 		return ErrInvalidRoom
+	}
+	if !b.Start.After(time.Now()) {
+		return ErrInPast
 	}
 	if !b.End.After(b.Start) {
 		return ErrInvalidPeriod

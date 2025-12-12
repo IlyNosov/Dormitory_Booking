@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,6 +19,13 @@ import (
 type Handlers struct {
 	svc           *appbooking.Service
 	adminPassword string
+}
+
+func normalizeTG(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "@")
+	s = strings.ToLower(s)
+	return s
 }
 
 func NewHandlers(svc *appbooking.Service) *Handlers {
@@ -66,6 +74,11 @@ func (h *Handlers) AdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) isAdmin(r *http.Request) bool {
+	// 1) header token
+	if tok := r.Header.Get("X-Admin-Token"); tok != "" && tok == os.Getenv("ADMIN_TOKEN") {
+		return true
+	}
+	// 2) cookie
 	c, err := r.Cookie("admin_token")
 	return err == nil && c.Value == "1"
 }
@@ -151,17 +164,19 @@ func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	isAdmin := h.isAdmin(r)
 
-	// пользователь без логина удаляет "свою" бронь по telegramId, переданному в query
 	requesterID := r.URL.Query().Get("tg")
+	if requesterID == "" {
+		requesterID = r.Header.Get("X-User-TelegramID")
+	}
 
 	err := h.svc.DeleteBooking(r.Context(), id, requesterID, isAdmin)
 	if err != nil {
 		if errors.Is(err, domain.ErrForbidden) {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		if errors.Is(err, domain.ErrNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)

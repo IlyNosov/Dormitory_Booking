@@ -114,11 +114,15 @@ func timesOverlap(s1, e1, s2, e2 time.Time) bool {
 const maxBookingDuration = 3 * time.Hour
 
 func validateDuration(b domain.Booking) error {
+
+	// Лимит 3 часа только на приватные
+
 	dur := b.End.Sub(b.Start)
 	if dur <= 0 {
 		return domain.ErrInvalidPeriod
 	}
-	if dur > maxBookingDuration {
+
+	if b.IsPrivate && dur > maxBookingDuration {
 		return domain.ErrTooLongDuration
 	}
 	return nil
@@ -187,9 +191,10 @@ func validateRoomSchedule(b domain.Booking) error {
 	if startLocal.Before(openTime) || endLocal.After(closeTime) {
 		return domain.ErrInvalidTime
 	}
+
 	now := time.Now().In(loc)
 	if startLocal.Before(now) {
-		return domain.ErrInvalidTime
+		return domain.ErrInPast
 	}
 
 	return nil
