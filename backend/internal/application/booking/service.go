@@ -11,12 +11,21 @@ import (
 	domain "Dormitory_Booking/internal/domain/booking"
 )
 
+type Notifier interface {
+	NotifyNewBooking(ctx context.Context, b domain.Booking) error
+}
+
 type Service struct {
-	repo domain.Repository
+	repo     domain.Repository
+	notifier Notifier
 }
 
 func NewService(repo domain.Repository) *Service {
 	return &Service{repo: repo}
+}
+
+func NewServiceWithNotifier(repo domain.Repository, notifier Notifier) *Service {
+	return &Service{repo: repo, notifier: notifier}
 }
 
 // CreateBookingInput - данные от HTTP/бота/парсера для создания брони.
@@ -101,7 +110,14 @@ func (s *Service) CreateBooking(ctx context.Context, in CreateBookingInput) (dom
 		}
 	}
 
-	return s.repo.Create(ctx, b)
+	created, err := s.repo.Create(ctx, b)
+	if err != nil {
+		return domain.Booking{}, err
+	}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyNewBooking(ctx, created)
+	}
+	return created, nil
 }
 
 // timesOverlap проверяет пересечение двух временных интервалов.
