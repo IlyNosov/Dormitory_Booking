@@ -1,6 +1,6 @@
 package server
 
-// В этом файле HTTP-обработчики для бронирований и простая админ-авторизация.
+// В этом файле HTTP-обработчики для бронирований, администратора и привязки Telegram.
 
 import (
 	"encoding/json"
@@ -13,11 +13,14 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	appbooking "Dormitory_Booking/internal/application/booking"
+	apptglink "Dormitory_Booking/internal/application/tglink"
 	domain "Dormitory_Booking/internal/domain/booking"
+	"Dormitory_Booking/internal/domain/tglink"
 )
 
 type Handlers struct {
 	svc           *appbooking.Service
+	linkSvc       *apptglink.Service
 	adminPassword string
 }
 
@@ -28,9 +31,10 @@ func normalizeTG(s string) string {
 	return s
 }
 
-func NewHandlers(svc *appbooking.Service) *Handlers {
+func NewHandlers(svc *appbooking.Service, linkSvc *apptglink.Service) *Handlers {
 	return &Handlers{
 		svc:           svc,
+		linkSvc:       linkSvc,
 		adminPassword: os.Getenv("ADMIN_PASSWORD"),
 	}
 }
@@ -74,13 +78,16 @@ func (h *Handlers) AdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) isAdmin(r *http.Request) bool {
-	// 1) header token
 	if tok := r.Header.Get("X-Admin-Token"); tok != "" && tok == os.Getenv("ADMIN_TOKEN") {
 		return true
 	}
-	// 2) cookie
 	c, err := r.Cookie("admin_token")
 	return err == nil && c.Value == "1"
+}
+
+// sessionID извлекает идентификатор сессии из заголовка X-Session-ID.
+func sessionID(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Session-ID"))
 }
 
 // Бронирования
@@ -92,9 +99,15 @@ func (h *Handlers) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sid := sessionID(r)
+	var currentTgID string
+	if sid != "" && h.linkSvc != nil {
+		currentTgID, _ = h.linkSvc.GetLinkedTelegramID(sid)
+	}
+
 	out := make([]appbooking.BookingDTO, 0, len(list))
 	for _, b := range list {
-		out = append(out, appbooking.ToDTO(b, "", h.isAdmin(r)))
+		out = append(out, appbooking.ToDTO(b, currentTgID, h.isAdmin(r)))
 	}
 	writeJSON(w, out)
 }
@@ -130,6 +143,16 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Если TelegramID не передан с фронта — пробуем взять из привязки сессии.
+	telegramID := strings.TrimSpace(body.TelegramID)
+	if telegramID == "" && h.linkSvc != nil {
+		if sid := sessionID(r); sid != "" {
+			if linked, ok := h.linkSvc.GetLinkedTelegramID(sid); ok {
+				telegramID = linked
+			}
+		}
+	}
+
 	start, err := time.Parse(time.RFC3339, body.Start)
 	if err != nil {
 		http.Error(w, "invalid start time", http.StatusBadRequest)
@@ -147,7 +170,7 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		Room:        domain.Room(body.Room),
 		Title:       body.Title,
 		Description: body.Description,
-		TelegramID:  body.TelegramID,
+		TelegramID:  telegramID,
 		IsPrivate:   body.IsPrivate,
 	}
 
@@ -157,7 +180,7 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, appbooking.ToDTO(b, body.TelegramID, h.isAdmin(r)))
+	writeJSON(w, appbooking.ToDTO(b, telegramID, h.isAdmin(r)))
 }
 
 func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +190,14 @@ func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
 	requesterID := r.URL.Query().Get("tg")
 	if requesterID == "" {
 		requesterID = r.Header.Get("X-User-TelegramID")
+	}
+	// Fallback: по сессии
+	if requesterID == "" && h.linkSvc != nil {
+		if sid := sessionID(r); sid != "" {
+			if linked, ok := h.linkSvc.GetLinkedTelegramID(sid); ok {
+				requesterID = linked
+			}
+		}
 	}
 
 	err := h.svc.DeleteBooking(r.Context(), id, requesterID, isAdmin)
@@ -183,6 +214,97 @@ func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Привязка Telegram
+
+// LinkStatus возвращает статус привязки для текущей сессии.
+func (h *Handlers) LinkStatus(w http.ResponseWriter, r *http.Request) {
+	if h.linkSvc == nil {
+		writeJSON(w, map[string]any{"linked": false, "botDisabled": true})
+		return
+	}
+	sid := sessionID(r)
+	if sid == "" {
+		http.Error(w, "X-Session-ID required", http.StatusBadRequest)
+		return
+	}
+
+	l, _ := h.linkSvc.GetOrCreate(sid)
+	writeJSON(w, map[string]any{
+		"linked":     l.Confirmed,
+		"telegramId": l.TelegramID,
+	})
+}
+
+// LinkGenerate создаёт новый токен привязки и возвращает его.
+func (h *Handlers) LinkGenerate(w http.ResponseWriter, r *http.Request) {
+	if h.linkSvc == nil {
+		http.Error(w, "bot not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sid := sessionID(r)
+	if sid == "" {
+		http.Error(w, "X-Session-ID required", http.StatusBadRequest)
+		return
+	}
+
+	token, err := h.linkSvc.GenerateToken(sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"token": token})
+}
+
+// LinkConfirm вызывается ботом: подтверждает токен и записывает telegramID.
+// Защищён секретом BOT_INTERNAL_SECRET.
+func (h *Handlers) LinkConfirm(w http.ResponseWriter, r *http.Request) {
+	if h.linkSvc == nil {
+		http.Error(w, "bot not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	secret := os.Getenv("BOT_INTERNAL_SECRET")
+	if secret == "" || r.Header.Get("X-Bot-Secret") != secret {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		Token      string `json:"token"`
+		TelegramID string `json:"telegramId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.linkSvc.ConfirmLink(body.Token, body.TelegramID); err != nil {
+		if errors.Is(err, tglink.ErrTokenExpired) {
+			http.Error(w, "token not found or expired", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// LinkUnlink сбрасывает привязку.
+func (h *Handlers) LinkUnlink(w http.ResponseWriter, r *http.Request) {
+	if h.linkSvc == nil {
+		http.Error(w, "bot not configured", http.StatusServiceUnavailable)
+		return
+	}
+	sid := sessionID(r)
+	if sid == "" {
+		http.Error(w, "X-Session-ID required", http.StatusBadRequest)
+		return
+	}
+	_ = h.linkSvc.Unlink(sid)
 	w.WriteHeader(http.StatusNoContent)
 }
 

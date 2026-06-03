@@ -3,8 +3,13 @@ package bot
 import (
 	appbooking "Dormitory_Booking/internal/application/booking"
 	domain "Dormitory_Booking/internal/domain/booking"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,22 +46,45 @@ type BookingBot struct {
 	svc      *appbooking.Service
 	sessions map[int64]*bookingSession
 	mu       sync.Mutex
+	// backendURL — внутренний адрес backend для подтверждения привязки Telegram.
+	// Читается из BACKEND_INTERNAL_URL, дефолт http://localhost:8080.
+	backendURL string
+	botSecret  string
 }
 
-func StartBookingBot(ctx context.Context, token string, svc *appbooking.Service) error {
+// API возвращает BotAPI для использования в других нотификаторах.
+func (b *BookingBot) API() *tgbotapi.BotAPI {
+	return b.bot
+}
+
+// NewBotAPI создаёт и инициализирует BotAPI без запуска polling.
+// Используется для создания нотификаторов до запуска основного бота.
+func NewBotAPI(token string) (*tgbotapi.BotAPI, error) {
 	b, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, _ = b.Request(tgbotapi.DeleteWebhookConfig{})
+	return b, nil
+}
+
+// StartBookingBot запускает polling на уже созданном BotAPI.
+func StartBookingBot(ctx context.Context, api *tgbotapi.BotAPI, svc *appbooking.Service) *BookingBot {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-	updates := b.GetUpdatesChan(u)
+	updates := api.GetUpdatesChan(u)
 
-	bot := &BookingBot{
-		bot:      b,
-		svc:      svc,
-		sessions: make(map[int64]*bookingSession),
+	backendURL := os.Getenv("BACKEND_INTERNAL_URL")
+	if backendURL == "" {
+		backendURL = "http://localhost:8080"
+	}
+
+	instance := &BookingBot{
+		bot:        api,
+		svc:        svc,
+		sessions:   make(map[int64]*bookingSession),
+		backendURL: backendURL,
+		botSecret:  os.Getenv("BOT_INTERNAL_SECRET"),
 	}
 
 	go func() {
@@ -71,12 +99,12 @@ func StartBookingBot(ctx context.Context, token string, svc *appbooking.Service)
 				if upd.Message.Chat == nil || !upd.Message.Chat.IsPrivate() {
 					continue
 				}
-				bot.handleMessage(upd.Message)
+				instance.handleMessage(upd.Message)
 			}
 		}
 	}()
 
-	return nil
+	return instance
 }
 
 func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
@@ -85,20 +113,37 @@ func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
 
 	switch {
 	case strings.HasPrefix(text, "/start"):
-		b.reply(m.Chat.ID, "Привет! Я помогу забронировать комнату. Команды:\n/book — начать бронирование\n/cancel — отменить текущий ввод")
+		// Поддержка deep link: /start TOKEN
+		parts := strings.Fields(text)
+		if len(parts) == 2 {
+			b.handleLinkToken(m, parts[1])
+			return
+		}
+		b.reply(m.Chat.ID, "Привет! Я помогу забронировать комнату.\n\nКоманды:\n/book — начать бронирование\n/link <КОД> — привязать аккаунт Telegram к платформе\n/cancel — отменить текущий ввод")
 		return
+
 	case strings.HasPrefix(text, "/cancel"):
 		b.mu.Lock()
 		delete(b.sessions, userID)
 		b.mu.Unlock()
 		b.reply(m.Chat.ID, "Ок, отменил текущую сессию бронирования.")
 		return
+
 	case strings.HasPrefix(text, "/book"):
 		sess := &bookingSession{Step: stepRoom}
 		b.mu.Lock()
 		b.sessions[userID] = sess
 		b.mu.Unlock()
 		b.reply(m.Chat.ID, "Давайте забронируем. Укажите номер комнаты (21, 132, 256):")
+		return
+
+	case strings.HasPrefix(text, "/link"):
+		parts := strings.Fields(text)
+		if len(parts) != 2 {
+			b.reply(m.Chat.ID, "Используй: /link КОД\n\nКод можно получить на сайте в разделе «Привязать Telegram».")
+			return
+		}
+		b.handleLinkToken(m, parts[1])
 		return
 	}
 
@@ -109,6 +154,57 @@ func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
 		b.reply(m.Chat.ID, "Не понял. Наберите /book чтобы начать бронирование или /start.")
 		return
 	}
+
+	b.handleBookingStep(m, sess)
+}
+
+// handleLinkToken подтверждает привязку Telegram к платформе.
+func (b *BookingBot) handleLinkToken(m *tgbotapi.Message, token string) {
+	telegramID := fmt.Sprintf("%d", m.From.ID)
+
+	payload, _ := json.Marshal(map[string]string{
+		"token":      strings.ToUpper(strings.TrimSpace(token)),
+		"telegramId": telegramID,
+	})
+
+	req, err := http.NewRequest("POST", b.backendURL+"/link/telegram/confirm", bytes.NewReader(payload))
+	if err != nil {
+		b.reply(m.Chat.ID, "Внутренняя ошибка. Попробуйте ещё раз.")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bot-Secret", b.botSecret)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("link confirm request error: %v", err)
+		b.reply(m.Chat.ID, "Не удалось связаться с сервером. Попробуйте позже.")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		name := m.From.FirstName
+		if m.From.UserName != "" {
+			name = "@" + m.From.UserName
+		}
+		b.reply(m.Chat.ID, fmt.Sprintf(
+			"✅ Аккаунт %s привязан к платформе!\n\nТеперь твои брони с сайта будут отображаться здесь, а уведомления — приходить в этот чат.",
+			name,
+		))
+	case http.StatusNotFound:
+		b.reply(m.Chat.ID, "❌ Код не найден или уже использован. Получи новый код на сайте.")
+	case http.StatusForbidden:
+		b.reply(m.Chat.ID, "❌ Ошибка авторизации. Обратитесь к администратору.")
+	default:
+		b.reply(m.Chat.ID, "❌ Что-то пошло не так. Попробуйте позже.")
+	}
+}
+
+func (b *BookingBot) handleBookingStep(m *tgbotapi.Message, sess *bookingSession) {
+	text := strings.TrimSpace(m.Text)
+	userID := int64(m.From.ID)
 
 	switch sess.Step {
 	case stepRoom:
@@ -208,7 +304,7 @@ func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
 			return
 		}
 
-		b.reply(m.Chat.ID, fmt.Sprintf("Готово! Бронь создана: %s, комната %d, %s–%s",
+		b.reply(m.Chat.ID, fmt.Sprintf("✅ Готово! Бронь создана:\n%s, комната %d\n%s – %s",
 			booking.Title,
 			booking.Room,
 			booking.Start.Format("02.01 15:04"),

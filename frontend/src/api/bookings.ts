@@ -4,9 +4,14 @@ import { normalizeApiError } from "../utils/errors";
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || "";
 
 let ADMIN_TOKEN = "";
+let SESSION_ID = "";
 
 export function setAdminToken(t: string | null) {
     ADMIN_TOKEN = (t || "").trim();
+}
+
+export function setSessionId(id: string) {
+    SESSION_ID = id;
 }
 
 function withHeaders(extra?: Record<string, string>) {
@@ -14,6 +19,7 @@ function withHeaders(extra?: Record<string, string>) {
         "Content-Type": "application/json",
         "X-User-Email": "student@edu.hse.ru",
         ...(ADMIN_TOKEN ? { "X-Admin-Token": ADMIN_TOKEN } : {}),
+        ...(SESSION_ID ? { "X-Session-ID": SESSION_ID } : {}),
         ...(extra ?? {}),
     };
 }

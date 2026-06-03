@@ -13,6 +13,7 @@ import (
 
 type Notifier interface {
 	NotifyNewBooking(ctx context.Context, b domain.Booking) error
+	NotifyDeletedBooking(ctx context.Context, b domain.Booking) error
 }
 
 type Service struct {
@@ -60,7 +61,13 @@ func (s *Service) DeleteBooking(ctx context.Context, id string, requesterID stri
 		return domain.ErrForbidden
 	}
 
-	return s.repo.Delete(ctx, id)
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return err
+	}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyDeletedBooking(ctx, b)
+	}
+	return nil
 }
 
 // CreateBooking создаёт новую бронь с учётом всех правил.

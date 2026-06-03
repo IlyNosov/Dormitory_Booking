@@ -16,7 +16,7 @@ import (
 func setupTestServer() http.Handler {
 	repo := memory.NewInMemoryBookingRepo()
 	svc := appbooking.NewService(repo)
-	return server.NewRouter(svc)
+	return server.NewRouter(svc, nil)
 }
 
 func futureTimes() (string, string) {

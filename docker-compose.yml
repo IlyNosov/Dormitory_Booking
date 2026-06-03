@@ -11,6 +11,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/deploy/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./backend/deploy/migrations/002_tg_links.sql:/docker-entrypoint-initdb.d/002_tg_links.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -30,6 +31,11 @@ services:
       HTTP_ADDR: "0.0.0.0:8080"
       DB_URL: "postgres://booking:booking@db:5432/booking?sslmode=disable"
       ADMINS: "you@edu.hse.ru"
+      # Telegram (заполнить в .env или здесь)
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
+      BACKEND_INTERNAL_URL: "http://backend:8080"
+      BOT_INTERNAL_SECRET: "${BOT_INTERNAL_SECRET}"
     depends_on:
       db:
         condition: service_healthy

@@ -18,9 +18,23 @@ import {DatePicker} from "../components/pickers/DatePicker";
 import {useAdmin} from "../admin/useAdmin";
 import {AdminModal} from "../admin/AdminModal";
 import * as api from "../api/bookings";
-import {setAdminToken} from "../api/bookings";
+import {setAdminToken, setSessionId} from "../api/bookings";
 import { RulesModal } from "../components/ui/RulesModal";
 import {BookingsTableView} from "../table/BookingsTableView";
+import {TelegramLink} from "../components/telegram/TelegramLink";
+
+// Генерируем или достаём постоянный session ID из localStorage.
+function getOrCreateSessionId(): string {
+    const key = "dorm_session_id";
+    let id = localStorage.getItem(key);
+    if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem(key, id);
+    }
+    return id;
+}
+
+const SESSION_ID = getOrCreateSessionId();
 
 function SelectInner<T extends string | number>({
                                                     label,
@@ -73,10 +87,15 @@ export function App() {
 
     const admin = useAdmin();
     const [adminOpen, setAdminOpen] = useState(false);
+    const [linkedTgId, setLinkedTgId] = useState<string>("");
 
     useEffect(() => {
         setAdminToken(admin.token);
     }, [admin.token]);
+
+    useEffect(() => {
+        setSessionId(SESSION_ID);
+    }, []);
 
     const [view, setView] = useState<ViewMode>("cards");
     const [viewKey, setViewKey] = useState(0);
@@ -195,7 +214,7 @@ export function App() {
 
     function validate(): string | null {
         if (!form.title.trim()) return "Заполни поле «Название».";
-        if (!form.telegramId.trim()) return "Укажи Telegram ID.";
+        if (!form.telegramId.trim() && !linkedTgId) return "Укажи Telegram ID или привяжи аккаунт Telegram.";
 
         let start: Date, end: Date;
         try {
@@ -271,6 +290,23 @@ export function App() {
                 onAdminLogout={admin.logout}
                 onRulesClick={() => setRulesOpen(true)}
             />
+            {/* Панель привязки Telegram */}
+            <div className="border-b border-zinc-700 bg-zinc-900/60 backdrop-blur">
+                <div className="mx-auto max-w-6xl px-4 py-2 flex items-center gap-3">
+                    <span className="text-xs text-zinc-500">Telegram:</span>
+                    <TelegramLink
+                        sessionId={SESSION_ID}
+                        onLinked={(tgId) => {
+                            setLinkedTgId(tgId);
+                            setForm((f) => ({...f, telegramId: tgId}));
+                        }}
+                        onUnlinked={() => {
+                            setLinkedTgId("");
+                            setForm((f) => ({...f, telegramId: ""}));
+                        }}
+                    />
+                </div>
+            </div>
 
 
             <main className="mx-auto max-w-6xl px-4 py-6">
@@ -334,11 +370,21 @@ export function App() {
                 </span>
                             </label>
 
-                            <label className="flex flex-col gap-1 text-sm">
-                                <span className="lbl">Telegram ID</span>
-                                <input className="field" placeholder="@username" value={form.telegramId}
-                                       onChange={(e) => setForm((f) => ({...f, telegramId: e.target.value}))}/>
-                            </label>
+                            {linkedTgId ? (
+                                <div className="flex flex-col gap-1 text-sm">
+                                    <span className="lbl">Telegram ID</span>
+                                    <div className="field flex items-center gap-2 text-emerald-400 bg-emerald-950/20">
+                                        ✅ Привязан (ID: {linkedTgId})
+                                    </div>
+                                </div>
+                            ) : (
+                                <label className="flex flex-col gap-1 text-sm">
+                                    <span className="lbl">Telegram ID</span>
+                                    <input className="field" placeholder="@username или числовой ID"
+                                           value={form.telegramId}
+                                           onChange={(e) => setForm((f) => ({...f, telegramId: e.target.value}))}/>
+                                </label>
+                            )}
 
                             <label className="md:col-span-2 flex flex-col gap-1 text-sm">
                                 <span className="lbl">Описание (необязательно)</span>
