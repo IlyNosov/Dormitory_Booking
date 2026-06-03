@@ -28,11 +28,12 @@ func futureTimes() (string, string) {
 func TestCreateBooking(t *testing.T) {
 	h := setupTestServer()
 
-	startStr, endStr := futureTimes()
+	start := time.Date(2099, 1, 5, 10, 0, 0, 0, time.UTC)
+	end := start.Add(1 * time.Hour)
 
 	body := map[string]any{
-		"start":       startStr,
-		"end":         endStr,
+		"start":       start.Format(time.RFC3339),
+		"end":         end.Format(time.RFC3339),
 		"room":        21,
 		"title":       "Test",
 		"description": "desc",

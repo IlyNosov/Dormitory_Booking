@@ -1,6 +1,6 @@
 # Бронирование Досуговых
 
-Система бронирования досуговых комнат в общежитиях — **Go**, **Vue**, **PostgreSQL**, **интеграция с Telegram**.
+Система бронирования досуговых комнат в общежитиях — **Go**, **React**, **PostgreSQL**, **интеграция с Telegram**.
 
 ## Что это?
 
@@ -21,7 +21,7 @@
 |------|-------------|
 | Backend | Go |
 | База данных | PostgreSQL |
-| Frontend | Vue + TypeScript + TailwindCSS |
+| Frontend | React + TypeScript + TailwindCSS |
 | Авторизация | Magic-link + почта @edu.hse.ru |
 | Инфраструктура | Docker |
 

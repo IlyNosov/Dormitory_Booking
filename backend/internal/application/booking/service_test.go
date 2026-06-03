@@ -53,7 +53,17 @@ func (r *fakeRepo) Delete(ctx context.Context, id string) error {
 }
 
 func futureInterval() (time.Time, time.Time) {
-	start := time.Now().Add(24 * time.Hour).Truncate(time.Minute)
+	loc := time.Local
+	now := time.Now().In(loc)
+
+	day := now.Add(24 * time.Hour)
+	start := time.Date(day.Year(), day.Month(), day.Day(), 12, 0, 0, 0, loc)
+
+	if !start.After(now) {
+		day = day.Add(24 * time.Hour)
+		start = time.Date(day.Year(), day.Month(), day.Day(), 12, 0, 0, 0, loc)
+	}
+
 	end := start.Add(1 * time.Hour)
 	return start, end
 }
