@@ -1,4 +1,4 @@
-name: ci-backend.yml
+name: ci-backend
 
 on:
   push:
@@ -69,7 +69,10 @@ jobs:
           done
 
           echo "Running migrations..."
-          PGPASSWORD=booking psql -h localhost -U booking -d booking -f deploy/migrations/001_init.sql
+          for f in $(ls deploy/migrations/*.sql | sort); do
+            echo "Applying $f"
+            PGPASSWORD=booking psql -h localhost -U booking -d booking -f "$f"
+          done
 
       - name: Go vet
         run: go vet ./...
