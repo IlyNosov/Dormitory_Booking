@@ -41,13 +41,27 @@ type bookingSession struct {
 	IsPrivate   bool
 }
 
+// authStep описывает шаг в процессе авторизации по email.
+type authStep int
+
+const (
+	authStepOTP authStep = iota // ожидаем ввода кода
+)
+
+type authSession struct {
+	Email string
+	Step  authStep
+}
+
 type BookingBot struct {
 	bot      *tgbotapi.BotAPI
 	svc      *appbooking.Service
 	sessions map[int64]*bookingSession
 	mu       sync.Mutex
-	// backendURL — внутренний адрес backend для подтверждения привязки Telegram.
-	// Читается из BACKEND_INTERNAL_URL, дефолт http://localhost:8080.
+
+	authSessions map[int64]*authSession
+	authMu       sync.Mutex
+
 	backendURL string
 	botSecret  string
 }
@@ -80,11 +94,12 @@ func StartBookingBot(ctx context.Context, api *tgbotapi.BotAPI, svc *appbooking.
 	}
 
 	instance := &BookingBot{
-		bot:        api,
-		svc:        svc,
-		sessions:   make(map[int64]*bookingSession),
-		backendURL: backendURL,
-		botSecret:  os.Getenv("BOT_INTERNAL_SECRET"),
+		bot:          api,
+		svc:          svc,
+		sessions:     make(map[int64]*bookingSession),
+		authSessions: make(map[int64]*authSession),
+		backendURL:   backendURL,
+		botSecret:    os.Getenv("BOT_INTERNAL_SECRET"),
 	}
 
 	go func() {
@@ -113,20 +128,38 @@ func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
 
 	switch {
 	case strings.HasPrefix(text, "/start"):
-		// Поддержка deep link: /start TOKEN
 		parts := strings.Fields(text)
 		if len(parts) == 2 {
 			b.handleLinkToken(m, parts[1])
 			return
 		}
-		b.reply(m.Chat.ID, "Привет! Я помогу забронировать комнату.\n\nКоманды:\n/book — начать бронирование\n/link <КОД> — привязать аккаунт Telegram к платформе\n/cancel — отменить текущий ввод")
+		b.reply(m.Chat.ID,
+			"Привет! Я помогу забронировать комнату.\n\n"+
+				"Команды:\n"+
+				"/auth EMAIL — войти через корпоративную почту\n"+
+				"/book — начать бронирование\n"+
+				"/link КОД — привязать Telegram к аккаунту на сайте\n"+
+				"/cancel — отменить текущую операцию",
+		)
 		return
 
 	case strings.HasPrefix(text, "/cancel"):
 		b.mu.Lock()
 		delete(b.sessions, userID)
 		b.mu.Unlock()
-		b.reply(m.Chat.ID, "Ок, отменил текущую сессию бронирования.")
+		b.authMu.Lock()
+		delete(b.authSessions, userID)
+		b.authMu.Unlock()
+		b.reply(m.Chat.ID, "Ок, отменил текущую операцию.")
+		return
+
+	case strings.HasPrefix(text, "/auth"):
+		parts := strings.Fields(text)
+		if len(parts) != 2 {
+			b.reply(m.Chat.ID, "Используй: /auth email@edu.hse.ru")
+			return
+		}
+		b.handleAuthRequest(m, parts[1])
 		return
 
 	case strings.HasPrefix(text, "/book"):
@@ -144,6 +177,15 @@ func (b *BookingBot) handleMessage(m *tgbotapi.Message) {
 			return
 		}
 		b.handleLinkToken(m, parts[1])
+		return
+	}
+
+	// Если пользователь в режиме ввода OTP — обрабатываем сначала.
+	b.authMu.Lock()
+	authSess, hasAuth := b.authSessions[userID]
+	b.authMu.Unlock()
+	if hasAuth {
+		b.handleAuthOTP(m, authSess)
 		return
 	}
 
@@ -199,6 +241,95 @@ func (b *BookingBot) handleLinkToken(m *tgbotapi.Message, token string) {
 		b.reply(m.Chat.ID, "❌ Ошибка авторизации. Обратитесь к администратору.")
 	default:
 		b.reply(m.Chat.ID, "❌ Что-то пошло не так. Попробуйте позже.")
+	}
+}
+
+// handleAuthRequest отправляет OTP на указанный email через backend.
+func (b *BookingBot) handleAuthRequest(m *tgbotapi.Message, email string) {
+	userID := int64(m.From.ID)
+
+	payload, _ := json.Marshal(map[string]string{"email": strings.ToLower(strings.TrimSpace(email))})
+	req, err := http.NewRequest("POST", b.backendURL+"/auth/otp/request", bytes.NewReader(payload))
+	if err != nil {
+		b.reply(m.Chat.ID, "Внутренняя ошибка. Попробуйте позже.")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("auth otp request error: %v", err)
+		b.reply(m.Chat.ID, "Не удалось связаться с сервером. Попробуйте позже.")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		b.authMu.Lock()
+		b.authSessions[userID] = &authSession{Email: strings.ToLower(strings.TrimSpace(email))}
+		b.authMu.Unlock()
+		b.reply(m.Chat.ID, fmt.Sprintf("📧 Код отправлен на %s\n\nВведите 6-значный код:", email))
+	case http.StatusBadRequest:
+		b.reply(m.Chat.ID, "❌ Недопустимый email. Используй корпоративный адрес (edu.hse.ru).")
+	case http.StatusTooManyRequests:
+		b.reply(m.Chat.ID, "❌ Слишком много запросов. Попробуй через час.")
+	default:
+		b.reply(m.Chat.ID, "❌ Ошибка сервера. Попробуй позже.")
+	}
+}
+
+// handleAuthOTP проверяет введённый OTP-код через backend.
+func (b *BookingBot) handleAuthOTP(m *tgbotapi.Message, sess *authSession) {
+	userID := int64(m.From.ID)
+	code := strings.TrimSpace(m.Text)
+
+	telegramID := fmt.Sprintf("%d", m.From.ID)
+	payload, _ := json.Marshal(map[string]string{
+		"email":      sess.Email,
+		"code":       code,
+		"telegramId": telegramID,
+	})
+	req, err := http.NewRequest("POST", b.backendURL+"/auth/otp/verify", bytes.NewReader(payload))
+	if err != nil {
+		b.reply(m.Chat.ID, "Внутренняя ошибка. Попробуйте позже.")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("auth otp verify error: %v", err)
+		b.reply(m.Chat.ID, "Не удалось связаться с сервером. Попробуйте позже.")
+		return
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		b.authMu.Lock()
+		delete(b.authSessions, userID)
+		b.authMu.Unlock()
+
+		var result struct {
+			Email        string `json:"email"`
+			IsAdmin      bool   `json:"isAdmin"`
+			IsSuperAdmin bool   `json:"isSuperAdmin"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+
+		text := fmt.Sprintf("✅ Вы вошли как %s", result.Email)
+		if result.IsSuperAdmin {
+			text += " (суперадмин)"
+		} else if result.IsAdmin {
+			text += " (администратор)"
+		}
+		text += "\n\nТеперь вы можете бронировать через сайт и бота — всё будет связано."
+		b.reply(m.Chat.ID, text)
+	case http.StatusUnauthorized:
+		b.reply(m.Chat.ID, "❌ Неверный или устаревший код. Попробуй ещё раз или начни заново с /auth.")
+	default:
+		b.reply(m.Chat.ID, "❌ Ошибка сервера. Попробуй позже.")
 	}
 }
 

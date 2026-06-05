@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	appbooking "Dormitory_Booking/internal/application/booking"
+	appauth "Dormitory_Booking/internal/application/auth"
 	apptglink "Dormitory_Booking/internal/application/tglink"
 	domain "Dormitory_Booking/internal/domain/booking"
 	"Dormitory_Booking/internal/domain/tglink"
@@ -21,6 +22,7 @@ import (
 type Handlers struct {
 	svc           *appbooking.Service
 	linkSvc       *apptglink.Service
+	authSvc       *appauth.Service
 	adminPassword string
 }
 
@@ -31,10 +33,11 @@ func normalizeTG(s string) string {
 	return s
 }
 
-func NewHandlers(svc *appbooking.Service, linkSvc *apptglink.Service) *Handlers {
+func NewHandlers(svc *appbooking.Service, linkSvc *apptglink.Service, authSvc *appauth.Service) *Handlers {
 	return &Handlers{
 		svc:           svc,
 		linkSvc:       linkSvc,
+		authSvc:       authSvc,
 		adminPassword: os.Getenv("ADMIN_PASSWORD"),
 	}
 }
@@ -78,9 +81,15 @@ func (h *Handlers) AdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) isAdmin(r *http.Request) bool {
+	// 1) Session-based admin (новая схема)
+	if user, ok := UserFromCtx(r.Context()); ok && user.IsAdmin {
+		return true
+	}
+	// 2) Legacy X-Admin-Token header
 	if tok := r.Header.Get("X-Admin-Token"); tok != "" && tok == os.Getenv("ADMIN_TOKEN") {
 		return true
 	}
+	// 3) Legacy admin cookie
 	c, err := r.Cookie("admin_token")
 	return err == nil && c.Value == "1"
 }
@@ -143,8 +152,13 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Если TelegramID не передан с фронта — пробуем взять из привязки сессии.
+	// Приоритет telegramID: тело запроса → auth-сессия → TG-link по session UUID.
 	telegramID := strings.TrimSpace(body.TelegramID)
+	if telegramID == "" {
+		if user, ok := UserFromCtx(r.Context()); ok && user.TelegramID != "" {
+			telegramID = user.TelegramID
+		}
+	}
 	if telegramID == "" && h.linkSvc != nil {
 		if sid := sessionID(r); sid != "" {
 			if linked, ok := h.linkSvc.GetLinkedTelegramID(sid); ok {

@@ -12,6 +12,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./backend/deploy/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
       - ./backend/deploy/migrations/002_tg_links.sql:/docker-entrypoint-initdb.d/002_tg_links.sql:ro
+      - ./backend/deploy/migrations/003_auth.sql:/docker-entrypoint-initdb.d/003_auth.sql:ro
     ports:
       - "5432:5432"
     healthcheck:

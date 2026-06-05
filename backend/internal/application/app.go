@@ -4,13 +4,17 @@ package app
 
 import (
 	appbooking "Dormitory_Booking/internal/application/booking"
+	appauth "Dormitory_Booking/internal/application/auth"
 	apptglink "Dormitory_Booking/internal/application/tglink"
 	domainbooking "Dormitory_Booking/internal/domain/booking"
 	tgbot "Dormitory_Booking/internal/infrastructure/booking_bot"
+	authmemory "Dormitory_Booking/internal/infrastructure/auth/memory"
+	authpostgres "Dormitory_Booking/internal/infrastructure/auth/postgres"
 	"Dormitory_Booking/internal/infrastructure/memory"
 	notifier "Dormitory_Booking/internal/infrastructure/notifier_bot"
 	pgrepo "Dormitory_Booking/internal/infrastructure/postgres"
 	"Dormitory_Booking/internal/infrastructure/server"
+	smtpmailer "Dormitory_Booking/internal/infrastructure/smtp"
 	tglinkstore "Dormitory_Booking/internal/infrastructure/tglink"
 	"context"
 	"fmt"
@@ -58,6 +62,20 @@ func Run(ctx context.Context) error {
 		linkSvc = apptglink.NewService(tglinkstore.NewPostgresStore(pool))
 	} else {
 		linkSvc = apptglink.NewService(tglinkstore.NewMemoryStore())
+	}
+
+	// ── Auth-сервис ───────────────────────────────────────────────────────────
+
+	var authSvc *appauth.Service
+	{
+		mailer := smtpmailer.New()
+		if pool != nil {
+			store := authpostgres.NewStore(pool)
+			authSvc = appauth.NewService(store, store, store, mailer)
+		} else {
+			store := authmemory.NewStore()
+			authSvc = appauth.NewService(store, store, store, mailer)
+		}
 	}
 
 	// ── Telegram: BotAPI → нотификаторы → сервис → booking-бот ───────────────
@@ -109,7 +127,7 @@ func Run(ctx context.Context) error {
 
 	// ── HTTP-сервер ───────────────────────────────────────────────────────────
 
-	handler := server.NewRouter(bookingSvc, linkSvc)
+	handler := server.NewRouter(bookingSvc, linkSvc, authSvc)
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      handler,
