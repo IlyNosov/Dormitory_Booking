@@ -13,11 +13,13 @@ export function TimePicker({
                                label,
                                value,
                                onChange,
+                               compact,
                            }: {
     label: string;
     dateStr: string;
     value: string;
     onChange: (hm: string) => void;
+    compact?: boolean;
 }) {
     const [hh, mm] = value.split(":").map((x) => parseInt(x, 10));
     const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
@@ -27,8 +29,18 @@ export function TimePicker({
         <div className="flex flex-col gap-2">
             <div className="text-sm lbl">{label}</div>
 
-            <div className="relative grid grid-cols-[1fr_auto_1fr] items-center gap-2 rounded-2xl bg-zinc-100/60 dark:bg-[color:var(--d-panel)] px-3 py-2 max-w-[420px]">
-                <div className="pointer-events-none absolute left-2 right-2 top-1/2 -translate-y-1/2 h-9 rounded-xl bg-white/70 dark:bg-white/5 ring-1 ring-zinc-300/70 dark:ring-white/10" />
+            <div
+                className={`relative grid grid-cols-[1fr_auto_1fr] items-center gap-2 rounded-2xl px-3 py-2 ${compact ? "max-w-[180px]" : "max-w-[420px]"}`}
+                style={{ background: "var(--d-panel)" }}
+            >
+                <div
+                    className="pointer-events-none absolute left-2 right-2 top-1/2 -translate-y-1/2 h-9 rounded-xl"
+                    style={{
+                        background: "var(--d-surface)",
+                        boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
+                        border: "1px solid var(--d-border)",
+                    }}
+                />
 
                 <WheelCol2
                     items={hours}
@@ -38,7 +50,7 @@ export function TimePicker({
                     ariaLabel={`${label}: часы`}
                 />
 
-                <div className="z-10 text-zinc-500 dark:text-zinc-400 font-medium">:</div>
+                <div className="z-10 font-medium" style={{ color: "var(--d-text-muted)" }}>:</div>
 
                 <WheelCol2
                     items={minutes}
@@ -90,6 +102,11 @@ function WheelCol2({
         setIdx(clamped);
         onPick(items[clamped]);
     };
+
+    // Keep a ref to commit so the wheel handler never captures a stale closure
+    const commitRef = useRef(commit);
+    useEffect(() => { commitRef.current = commit; }); // no deps — runs every render
+
     const hostRef = useRef<HTMLDivElement | null>(null);
 
     const wheelLockUntil = useRef(0);
@@ -106,14 +123,14 @@ function WheelCol2({
             if (now < wheelLockUntil.current) return;
 
             const dir = e.deltaY > 0 ? 1 : -1;
-            commit(idxRef.current + dir);
+            commitRef.current(idxRef.current + dir);
 
             wheelLockUntil.current = now + 60;
         };
 
         el.addEventListener("wheel", onWheelNative, { passive: false });
-        return () => el.removeEventListener("wheel", onWheelNative as any);
-    }, [items]);
+        return () => el.removeEventListener("wheel", onWheelNative as EventListener);
+    }, []); // empty deps — handler stays registered once, uses fresh ref
 
     const drag = useRef<{ down: boolean; y: number; acc: number }>({ down: false, y: 0, acc: 0 });
 
@@ -163,7 +180,8 @@ function WheelCol2({
                         return (
                             <div
                                 key={v}
-                                className={cn("h-10 flex items-center justify-center tabular-nums font-medium", active ? "text-zinc-100" : "text-zinc-500")}
+                                className={cn("h-10 flex items-center justify-center tabular-nums font-medium")}
+                                style={{ color: active ? "var(--d-text)" : "var(--d-text-muted)" }}
                             >
                                 {format(v)}
                             </div>

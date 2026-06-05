@@ -8,28 +8,42 @@ import (
 	domain "Dormitory_Booking/internal/domain/booking"
 )
 
-func TestToDTO_OwnerCanManage(t *testing.T) {
+func TestToDTO_TGOwnerCanManage(t *testing.T) {
 	b := domain.Booking{
 		ID:          "42",
 		Start:       time.Now(),
 		End:         time.Now().Add(time.Hour),
-		Room:        domain.Room21,
+		Room:        21,
 		Title:       "Тестовая бронь",
-		Description: "Описание тестовой брони",
+		Description: "Описание",
 		TelegramID:  "111",
 		IsPrivate:   true,
 	}
 
-	dto := app.ToDTO(b, "111", false)
+	dto := app.ToDTO(b, "", "111", false)
 
 	if !dto.CanManage {
-		t.Fatalf("владелец должен иметь CanManage=true")
+		t.Fatalf("владелец по TG должен иметь CanManage=true")
 	}
 	if dto.Description != b.Description {
 		t.Fatalf("описание должно прокидываться в DTO")
 	}
-	if dto.Room != int(b.Room) {
+	if dto.Room != b.Room {
 		t.Fatalf("номер комнаты должен совпадать")
+	}
+}
+
+func TestToDTO_EmailOwnerCanManage(t *testing.T) {
+	b := domain.Booking{
+		ID:        "43",
+		Title:     "Бронь по email",
+		UserEmail: "student@edu.hse.ru",
+	}
+
+	dto := app.ToDTO(b, "student@edu.hse.ru", "", false)
+
+	if !dto.CanManage {
+		t.Fatalf("владелец по email должен иметь CanManage=true")
 	}
 }
 
@@ -40,10 +54,10 @@ func TestToDTO_NonOwnerCannotManage(t *testing.T) {
 		TelegramID: "owner",
 	}
 
-	dto := app.ToDTO(b, "stranger", false)
+	dto := app.ToDTO(b, "stranger@edu.hse.ru", "other", false)
 
 	if dto.CanManage {
-		t.Fatalf("человек без прав не должен иметь CanManage=true")
+		t.Fatalf("чужой не должен иметь CanManage=true")
 	}
 }
 
@@ -54,7 +68,7 @@ func TestToDTO_AdminCanManage(t *testing.T) {
 		TelegramID: "owner",
 	}
 
-	dto := app.ToDTO(b, "whoever", true)
+	dto := app.ToDTO(b, "whoever@edu.hse.ru", "", true)
 
 	if !dto.CanManage {
 		t.Fatalf("админ всегда должен иметь CanManage=true")

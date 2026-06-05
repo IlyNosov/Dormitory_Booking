@@ -67,6 +67,18 @@ func (r *InMemoryBookingRepo) Create(ctx context.Context, b booking.Booking) (bo
 	return b, nil
 }
 
+// Update обновляет существующую бронь.
+func (r *InMemoryBookingRepo) Update(ctx context.Context, b booking.Booking) (booking.Booking, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.bookings[b.ID]; !ok {
+		return booking.Booking{}, booking.ErrNotFound
+	}
+	r.bookings[b.ID] = b
+	return b, nil
+}
+
 // Delete удаляет бронь, если она существует.
 func (r *InMemoryBookingRepo) Delete(ctx context.Context, id string) error {
 	r.mu.Lock()

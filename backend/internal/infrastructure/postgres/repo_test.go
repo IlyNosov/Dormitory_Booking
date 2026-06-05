@@ -46,7 +46,7 @@ func TestPostgresRepo_CreateAndGet(t *testing.T) {
 	b := booking.Booking{
 		Start:      time.Now(),
 		End:        time.Now().Add(time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "PG Test",
 		TelegramID: "111",
 		IsPrivate:  false,
@@ -75,7 +75,7 @@ func TestPostgresRepo_List(t *testing.T) {
 	repo.Create(ctx, booking.Booking{
 		Start:      time.Now(),
 		End:        time.Now().Add(time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "A",
 		TelegramID: "123",
 	})
@@ -83,7 +83,7 @@ func TestPostgresRepo_List(t *testing.T) {
 	repo.Create(ctx, booking.Booking{
 		Start:      time.Now().Add(2 * time.Hour),
 		End:        time.Now().Add(3 * time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "B",
 		TelegramID: "123",
 	})
@@ -106,7 +106,7 @@ func TestPostgresRepo_Delete(t *testing.T) {
 	created, _ := repo.Create(ctx, booking.Booking{
 		Start:      time.Now(),
 		End:        time.Now().Add(time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "To delete",
 		TelegramID: "222",
 	})
@@ -131,7 +131,7 @@ func TestPostgresRepo_OverlapConstraint(t *testing.T) {
 	_, err := repo.Create(ctx, booking.Booking{
 		Start:      start,
 		End:        start.Add(1 * time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "Base",
 		TelegramID: "333",
 	})
@@ -141,7 +141,7 @@ func TestPostgresRepo_OverlapConstraint(t *testing.T) {
 	_, err = repo.Create(ctx, booking.Booking{
 		Start:      start.Add(30 * time.Minute),
 		End:        start.Add(90 * time.Minute),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "Overlap",
 		TelegramID: "333",
 	})

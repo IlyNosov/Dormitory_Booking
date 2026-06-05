@@ -1,585 +1,1072 @@
-import React, {useEffect, useMemo, useState} from "react";
-import {AlertTriangle, Filter, Lock, Menu, Unlock} from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Lock, Unlock, ChevronRight, Send } from "lucide-react";
 
-import type {Bookings, CreateBookingPayload, RoomFilter, ViewMode, VisFilter} from "../types/bookings";
-import {cn} from "../utils/cn";
-import {fmtRange, fromYMD, msToHuman, pad2, toYMD} from "../utils/date";
-import {isFriOrSat, isQuiet} from "../utils/rules";
-import {ROOM_COLORS} from "../utils/rooms";
+import type { Booking, CreateBookingPayload, RoomFilter, ViewMode, VisFilter, RoomInfo } from "../types/bookings";
+import { cn } from "../utils/cn";
+import { fmtRange, fromYMD, msToHuman, pad2, toYMD } from "../utils/date";
+import { isQuiet } from "../utils/rules";
+import { normalizeApiError } from "../utils/errors";
 
-import {AppHeader} from "./AppHeader";
-import {DateFilter} from "../components/filters/DateFilter";
-import {TimePicker} from "../components/time/TimePicker";
-import {CardPattern} from "../components/patterns/CardPattern";
-import {HoverHint} from "../components/ui/HoverHint";
-import {Modal} from "../components/ui/Modal";
-import {Popover} from "../components/ui/Popover";
-import {DatePicker} from "../components/pickers/DatePicker";
-import {useAdmin} from "../admin/useAdmin";
-import {AdminModal} from "../admin/AdminModal";
-import * as api from "../api/bookings";
-import {setAdminToken} from "../api/bookings";
+import { AppHeader } from "./AppHeader";
+import { DateFilter, ALL_DATES, PAST_DATES } from "../components/filters/DateFilter";
+import { TimePicker } from "../components/time/TimePicker";
+import { BookingCard, displayRoom } from "../components/BookingCard";
+import { Modal } from "../components/ui/Modal";
+import { DatePicker } from "../components/pickers/DatePicker";
 import { RulesModal } from "../components/ui/RulesModal";
-import {BookingsTableView} from "../table/BookingsTableView";
+import { BookingsTableView } from "../table/BookingsTableView";
+import { AuthModal } from "../auth/AuthModal";
+import { AdminPanel } from "../admin/AdminPanel";
+import { RoomsPage } from "../pages/RoomsPage";
+import { useAuth } from "../auth/useAuth";
+import * as api from "../api/bookings";
+import { fetchRooms } from "../api/rooms";
 
-function SelectInner<T extends string | number>({
-                                                    label,
-                                                    value,
-                                                    options,
-                                                    onChange,
-                                                    format = String,
-                                                }: {
-    label?: string;
-    value: T;
-    options: readonly T[];
-    onChange: (v: T) => void;
-    format?: (v: T) => string;
-}) {
-    const [open, setOpen] = useState(false);
-    const ref = React.useRef<HTMLButtonElement | null>(null);
-    return (
-        <label className="flex flex-col gap-1 text-sm">
-            {label && <span className="lbl">{label}</span>}
-            <button ref={ref} type="button" className="field flex items-center justify-between"
-                    onClick={() => setOpen((o) => !o)}>
-                <span>{format(value)}</span>
-                <span className="opacity-60">▾</span>
-            </button>
-            <Popover open={open} onClose={() => setOpen(false)} anchor={ref.current}>
-                <div className="max-h-64 overflow-auto rounded-xl">
-                    {options.map((opt) => (
-                        <button
-                            key={String(opt)}
-                            type="button"
-                            onClick={() => {
-                                onChange(opt);
-                                setOpen(false);
-                            }}
-                            className={cn(
-                                "block w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800",
-                                String(opt) === String(value) && "bg-blue-50 dark:bg-blue-950/30",
-                            )}
-                        >
-                            {format(opt)}
-                        </button>
-                    ))}
-                </div>
-            </Popover>
-        </label>
-    );
+// ─── constants ────────────────────────────────────────────────────────────────
+const RU_WEEKDAY_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+const RU_MONTH_SHORT = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+
+// ─── BookingWizard ─────────────────────────────────────────────────────────────
+interface WizardForm {
+  date: string;
+  startH: number;
+  startM: number;
+  endH: number;
+  endM: number;
+  room: number | null;
+  title: string;
+  description: string;
+  isPrivate: boolean;
+  telegramId: string;
 }
 
-export function App() {
+// Step label component
+function StepLabel({ n, label }: { n: number; label: string }) {
+  return (
+    <div className="flex items-center gap-2 mb-3">
+      <div
+        className="flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold text-white shrink-0"
+        style={{ background: "var(--d-primary)" }}
+      >
+        {n}
+      </div>
+      <span className="text-sm font-semibold" style={{ color: "var(--d-text)" }}>{label}</span>
+    </div>
+  );
+}
 
-    const admin = useAdmin();
-    const [adminOpen, setAdminOpen] = useState(false);
-
-    useEffect(() => {
-        setAdminToken(admin.token);
-    }, [admin.token]);
-
-    const [view, setView] = useState<ViewMode>("cards");
-    const [viewKey, setViewKey] = useState(0);
-    const [rulesOpen, setRulesOpen] = useState(false);
-    const [bookings, setBookings] = useState<Bookings[] | null>(null);
-    const [loading, setLoading] = useState(false);
-    const [adding, setAdding] = useState(false);
-    const [errMsg, setErrMsg] = useState("");
-    const [nowTs, setNowTs] = useState(Date.now());
-    const [inspect, setInspect] = useState<Bookings | null>(null);
-
-    useEffect(() => {
-        const t = setInterval(() => setNowTs(Date.now()), 30000);
-        return () => clearInterval(t);
-    }, []);
-
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const [fromDate, setFromDate] = useState(toYMD(startOfToday));
-    const [days, setDays] = useState(7);
-    const [roomFilter, setRoomFilter] = useState<RoomFilter>("all");
-    const [visFilter, setVisFilter] = useState<VisFilter>("all");
-
-    const dS = new Date(Date.now() + 30 * 60 * 1000);
-    const dE = new Date(Date.now() + 90 * 60 * 1000);
-    const step5 = (n: number) => pad2((Math.round(n / 5) * 5) % 60);
-
-    const [form, setForm] = useState({
-        date: toYMD(dS),
-        startTime: `${pad2(dS.getHours())}:${step5(dS.getMinutes())}`,
-        endTime: `${pad2(dE.getHours())}:${step5(dE.getMinutes())}`,
-        room: 21 as 21 | 132 | 256,
-        title: "",
-        telegramId: "",
-        isPrivate: false,
-        description: "",
-    });
-
-    async function fetchData() {
-        setLoading(true);
-        try {
-            const data = await api.fetchBookings();
-            setBookings(data);
-        } finally {
-            setLoading(false);
-        }
+// 14-day date strip for wizard
+function WizardDateStrip({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [showCalendar, setShowCalendar] = useState(false);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const days = useMemo(() => {
+    const result: { ymd: string; label: string; sub: string }[] = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() + i);
+      const ymd = toYMD(d);
+      result.push({
+        ymd,
+        label: i === 0 ? "Сег" : RU_WEEKDAY_SHORT[d.getDay()],
+        sub: `${d.getDate()} ${RU_MONTH_SHORT[d.getMonth()]}`,
+      });
     }
+    return result;
+  }, []);
 
-    useEffect(() => {
-        fetchData();
-    }, []);
+  const isInStrip = days.some(d => d.ymd === value);
 
-    const sorted = useMemo(
-        () => (bookings ? [...bookings].sort((a, b) => +new Date(a.start) - +new Date(b.start)) : []),
-        [bookings],
-    );
+  return (
+    <div className="space-y-3">
+      <div className="relative flex items-center gap-1">
+        {/* Left arrow — desktop only */}
+        <button
+          type="button"
+          className="hidden sm:flex shrink-0 w-8 h-8 items-center justify-center rounded-full hover:bg-[var(--d-panel)] transition-colors"
+          onClick={() => stripRef.current?.scrollBy({ left: -120, behavior: "smooth" })}
+          aria-label="Назад"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
 
-    const {futureByDay, pastFiltered, futureCount} = useMemo(() => {
-        const sw = +new Date(`${fromDate}T00:00`);
-        const ew = sw + days * 24 * 3600_000;
+      <div ref={stripRef} className="date-strip flex-1 pb-1">
+        {days.map((day) => {
+          const active = day.ymd === value;
+          return (
+            <button
+              key={day.ymd}
+              type="button"
+              onClick={() => { onChange(day.ymd); setShowCalendar(false); }}
+              className="flex-shrink-0 flex flex-col items-center px-3 py-1.5 rounded-xl border transition-all duration-200 ease-out"
+              style={active ? {
+                background: "var(--d-primary)",
+                borderColor: "var(--d-primary)",
+                color: "white",
+              } : {
+                background: "var(--d-surface)",
+                borderColor: "var(--d-border)",
+                color: "var(--d-text)",
+              }}
+            >
+              <span className="text-[10px] font-medium" style={{ color: active ? "rgba(255,255,255,0.8)" : "var(--d-text-muted)" }}>
+                {day.label}
+              </span>
+              <span className="text-xs font-semibold mt-0.5">
+                {day.sub}
+              </span>
+            </button>
+          );
+        })}
+      </div>
 
-        const fits = (b: Bookings) => {
-            if (roomFilter !== "all" && b.room !== roomFilter) return false;
-            if (visFilter === "public" && b.isPrivate) return false;
-            if (visFilter === "private" && !b.isPrivate) return false;
-            return true;
-        };
+        {/* Right arrow — desktop only */}
+        <button
+          type="button"
+          className="hidden sm:flex shrink-0 w-8 h-8 items-center justify-center rounded-full hover:bg-[var(--d-panel)] transition-colors"
+          onClick={() => stripRef.current?.scrollBy({ left: 120, behavior: "smooth" })}
+          aria-label="Вперёд"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
 
-        const future = new Map<string, Bookings[]>();
-        const past: Bookings[] = [];
-        let fcount = 0;
+      {/* "Other date" toggle */}
+      <button
+        type="button"
+        className="text-xs underline underline-offset-2"
+        style={{ color: "var(--d-text-muted)" }}
+        onClick={() => setShowCalendar(v => !v)}
+      >
+        {showCalendar ? "Скрыть календарь" : "Другая дата"}
+        {!isInStrip && value ? ` (выбрано: ${value})` : ""}
+      </button>
 
-        for (const b of sorted) {
-            const s = +new Date(b.start);
-            const e = +new Date(b.end);
-
-            if (e < nowTs) {
-                if (fits(b)) past.push(b);
-                continue;
-            }
-
-            const overlap = !(e <= sw || s >= ew);
-            if (!overlap || !fits(b)) continue;
-
-            const key = toYMD(new Date(b.start));
-            (future.get(key) ?? future.set(key, []).get(key)!).push(b);
-            fcount++;
-        }
-
-        for (const [, v] of future) v.sort((a, b) => +new Date(a.start) - +new Date(b.start));
-        past.sort((a, b) => +new Date(b.end) - +new Date(a.end));
-
-        return {futureByDay: future, pastFiltered: past, futureCount: fcount};
-    }, [sorted, fromDate, days, roomFilter, visFilter, nowTs]);
-
-    function computeStartEnd() {
-        const start = new Date(`${form.date}T${form.startTime}:00`);
-        const endSame = new Date(`${form.date}T${form.endTime}:00`);
-
-        const [sh, sm] = form.startTime.split(":").map(Number);
-        const [eh, em] = form.endTime.split(":").map(Number);
-
-        let end = endSame;
-        const startMin = sh * 60 + sm;
-        const endMin = eh * 60 + em;
-
-        if (endMin < startMin) {
-            const base = fromYMD(form.date);
-            if (!(isFriOrSat(base) && endMin <= 60)) {
-                throw new Error("Перенос через полночь допустим только Пт/Сб до 01:00.");
-            }
-            end = new Date(+endSame + 24 * 3600_000);
-        }
-        return {start, end};
-    }
-
-    function validate(): string | null {
-        if (!form.title.trim()) return "Заполни поле «Название».";
-        if (!form.telegramId.trim()) return "Укажи Telegram ID.";
-
-        let start: Date, end: Date;
-        try {
-            ({start, end} = computeStartEnd());
-        } catch (e: any) {
-            return String(e?.message || e);
-        }
-
-        if (isNaN(+start) || isNaN(+end)) return "Укажи корректные дату и время.";
-        if (end <= start) return "Время окончания должно быть позже начала.";
-
-        const dur = +end - +start;
-        if (form.isPrivate && dur > 3 * 3600_000) return "Частная бронь не может длиться дольше 3 часов.";
-
-        if (form.isPrivate) {
-            for (let t = new Date(start); t < end; t = new Date(+t + 15 * 60_000)) {
-                if (isQuiet(t)) return "Частная бронь недоступна с 23:00 до 06:00 (до 01:00 ночи Пт-Сб и Сб-Вс).";
-            }
-        }
-        return null;
-    }
-
-    async function handleCreate() {
-        setErrMsg("");
-        const e = validate();
-        if (e) return setErrMsg(e);
-
-        const {start, end} = computeStartEnd();
-        const payload: CreateBookingPayload = {
-            start: start.toISOString(),
-            end: end.toISOString(),
-            room: form.room,
-            title: form.title.trim(),
-            telegramId: form.telegramId.trim(),
-            isPrivate: form.isPrivate,
-            description: form.description?.trim() || undefined,
-        };
-
-        try {
-            const created = await api.createBooking(payload);
-            setBookings((p) => (p ? [created, ...p] : [created]));
-            setForm((f) => ({...f, title: "", description: ""}));
-            setAdding(false);
-        } catch (err: any) {
-            setErrMsg(String(err?.message || err));
-        }
-    }
-
-    async function handleDelete(id: string, owner?: string) {
-        try {
-            await api.deleteBooking(id, owner);
-            setBookings((p) => (p ? p.filter((b) => b.id !== id) : p));
-        } catch (e: any) {
-            setErrMsg(String(e?.message || e));
-            await fetchData();
-        }
-    }
-
-    return (
-        <div
-            className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-[color:var(--d-bg)] dark:text-zinc-100 transition-colors">
-            <AppHeader
-                loading={loading}
-                view={view}
-                isAdmin={admin.isAdmin}
-                onToggleAdd={() => setAdding((v) => !v)}
-                onRefresh={fetchData}
-                onToggleView={() => {
-                    setView((v) => (v === "cards" ? "table" : "cards"));
-                    setViewKey((k) => k + 1);
-                }}
-                onAdminClick={() => setAdminOpen(true)}
-                onAdminLogout={admin.logout}
-                onRulesClick={() => setRulesOpen(true)}
-            />
-
-
-            <main className="mx-auto max-w-6xl px-4 py-6">
-                <div
-                    className={cn(
-                        "mb-6 overflow-hidden transition-[max-height,opacity,transform] duration-300",
-                        adding ? "max-h-[1400px] opacity-100 translate-y-0" : "max-h-0 opacity-0 -translate-y-2",
-                    )}
-                >
-                    <div
-                        className="rounded-2xl border border-zinc-200 dark:border-[color:var(--d-border)] bg-white/80 dark:bg-[color:var(--d-card)] backdrop-blur p-4">
-                        {errMsg && (
-                            <div
-                                className="mb-3 flex items-start gap-2 rounded-xl border border-red-300/50 bg-red-50 dark:bg-rose-950/20 text-red-700 dark:text-rose-300 px-3 py-2 text-sm">
-                                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5"/>
-                                <div>{errMsg}</div>
-                            </div>
-                        )}
-
-                        <div className="grid gap-6 md:grid-cols-[320px_1fr]">
-                            <DatePicker
-                                value={form.date}
-                                onChange={(v) => setForm((f) => ({...f, date: v}))}
-                            />
-
-                            <div className="grid sm:grid-cols-2 gap-6 items-center">
-                                <TimePicker
-                                    label="Время начала"
-                                    dateStr={form.date}
-                                    value={form.startTime}
-                                    onChange={(hm) => setForm((f) => ({...f, startTime: hm}))}
-                                />
-
-                                <TimePicker
-                                    label="Время окончания"
-                                    dateStr={form.date}
-                                    value={form.endTime}
-                                    onChange={(hm) => setForm((f) => ({...f, endTime: hm}))}
-                                />
-                            </div>
-                        </div>
-
-                        <div className="mt-6 grid md:grid-cols-2 gap-4">
-                            <SelectInner label="Комната" value={form.room} options={[21, 256, 132] as const}
-                                         onChange={(v) => setForm((f) => ({...f, room: v}))}
-                                         format={(v) => `Комната ${v}`}/>
-
-                            <label className="flex flex-col gap-1 text-sm">
-                                <span className="lbl">Название</span>
-                                <input className="field" placeholder="Название мероприятия" value={form.title}
-                                       onChange={(e) => setForm((f) => ({...f, title: e.target.value}))}/>
-                            </label>
-
-                            <label className="flex items-center gap-3 text-sm select-none">
-                                <button type="button" onClick={() => setForm((f) => ({...f, isPrivate: !f.isPrivate}))}
-                                        className={cn("switch", form.isPrivate && "switch-on")}
-                                        aria-pressed={form.isPrivate}/>
-                                <span
-                                    className={cn("font-medium tracking-wide", form.isPrivate ? "text-rose-600 dark:text-rose-300" : "text-emerald-700 dark:text-emerald-300")}>
-                  {form.isPrivate ? "Частная бронь" : "Публичная бронь"}
-                </span>
-                            </label>
-
-                            <label className="flex flex-col gap-1 text-sm">
-                                <span className="lbl">Telegram ID</span>
-                                <input className="field" placeholder="@username" value={form.telegramId}
-                                       onChange={(e) => setForm((f) => ({...f, telegramId: e.target.value}))}/>
-                            </label>
-
-                            <label className="md:col-span-2 flex flex-col gap-1 text-sm">
-                                <span className="lbl">Описание (необязательно)</span>
-                                <textarea className="field min-h-[74px]" placeholder="Подробности брони…"
-                                          value={form.description}
-                                          onChange={(e) => setForm((f) => ({...f, description: e.target.value}))}/>
-                            </label>
-                        </div>
-
-                        <div className="mt-4 flex gap-2">
-                            <button onClick={handleCreate} className="btn btn-primary">
-                                Создать
-                            </button>
-                            <button onClick={() => setAdding(false)} className="btn">
-                                Отмена
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                {/* фильтры */}
-                {view === "cards" ? (
-                    <section className="mb-5 fade-wrap">
-                        <div
-                            className="rounded-2xl border border-zinc-200 dark:border-[color:var(--d-border)] bg-white/75 dark:bg-[color:var(--d-card)] backdrop-blur p-4">
-                            <div className="grid gap-4 md:grid-cols-[320px_1fr]">
-                                <div className="grid grid-rows-[auto_auto] gap-2">
-                                    <span className="text-xs uppercase tracking-wide text-zinc-600 dark:text-zinc-400">
-                                        фильтры
-                                    </span>
-                                    <div className="flex items-end gap-6">
-                                        <DateFilter value={fromDate} onChange={setFromDate}/>
-                                        <div className="w-16">
-                                            <SelectInner
-                                                label="Дней"
-                                                value={days as any}
-                                                options={[1, 3, 5, 7, 10, 14] as const}
-                                                onChange={(v) => setDays(Number(v))}
-                                            />
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-rows-[auto_auto_auto] gap-3 justify-items-end">
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                        <button onClick={() => setRoomFilter("all")}
-                                                className={cn("btn", roomFilter === "all" && "btn-active")}>
-                                            Все комнаты
-                                        </button>
-                                        {[21, 256, 132].map((v) => (
-                                            <button key={`rm-${v}`} onClick={() => setRoomFilter(v as any)}
-                                                    className={cn("btn", roomFilter === v && "btn-active")}>
-                                                {`Комната ${v}`}
-                                            </button>
-                                        ))}
-                                    </div>
-
-                                    <div className="flex flex-wrap justify-end gap-2">
-                                        {(["all", "public", "private"] as const).map((v) => (
-                                            <button key={`vis-${v}`} onClick={() => setVisFilter(v)}
-                                                    className={cn("btn", visFilter === v && "btn-active")}>
-                                                {v === "all" ? "Все" : v === "public" ? "Публичные" : "Частные"}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    <div/>
-                                </div>
-                            </div>
-
-                        </div>
-                    </section>
-                ) : null}
-
-                <div key={viewKey} className="fade-wrap">
-                    {view === "cards" ? (
-                        <>
-                            <section className="space-y-6">
-                                {[...futureByDay.keys()].sort().map((dayKey) => {
-                                    const items = futureByDay.get(dayKey)!;
-                                    const ruDate = new Date(dayKey).toLocaleDateString("ru-RU", {
-                                        weekday: "long",
-                                        day: "2-digit",
-                                        month: "long"
-                                    });
-
-                                    return (
-                                        <div key={dayKey}>
-                                            <h2 className="mb-3 text-lg font-semibold capitalize">{ruDate}</h2>
-                                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                                                {items.map((b) => {
-                                                    const s = +new Date(b.start),
-                                                        e = +new Date(b.end);
-                                                    const active = nowTs >= s && nowTs <= e;
-                                                    const total = Math.max(1, e - s);
-                                                    const progress = Math.min(100, Math.max(0, ((nowTs - s) / total) * 100));
-                                                    const rc = ROOM_COLORS[b.room];
-
-                                                    const card = (
-                                                        <article
-                                                            className={cn("card group relative overflow-hidden transition-all duration-300", active ? `ring-2 ${rc.ring} ${rc.bg}` : "opacity-90 hover:opacity-100")}
-                                                            onClick={() => b.description && setInspect(b)}
-                                                        >
-                                                            <CardPattern room={b.room} active={active}/>
-                                                            {active && <div
-                                                                className={cn("absolute inset-0 z-[1] pointer-events-none", rc.bg)}/>}
-                                                            <div
-                                                                className="flex items-start justify-between mb-2 gap-3">
-                                                                <span
-                                                                    className="text-xs font-medium tracking-wide text-zinc-500 dark:text-zinc-400 mt-1">{fmtRange(b.start, b.end)}</span>
-                                                                <div className="flex items-center gap-2">
-                                  <span
-                                      className={cn("inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium", b.isPrivate ? "badge-priv" : "badge-pub")}>
-                                    {b.isPrivate ? <Lock className="h-3.5 w-3.5"/> : <Unlock className="h-3.5 w-3.5"/>}
-                                      {b.isPrivate ? "Частная" : "Публичная"}
-                                  </span>
-                                                                    {b.description &&
-                                                                        <Menu className="h-4 w-4 opacity-80"/>}
-                                                                    {admin.isAdmin && (
-                                                                        <button
-                                                                            onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                handleDelete(b.id, b.telegramId);
-                                                                            }}
-                                                                            className="icon-btn"
-                                                                            title="Удалить бронь"
-                                                                            aria-label="Удалить бронь"
-                                                                        >
-                                                                            <svg xmlns="http://www.w3.org/2000/svg"
-                                                                                 viewBox="0 0 24 24" width="16"
-                                                                                 height="16" fill="none"
-                                                                                 stroke="currentColor" strokeWidth="2"
-                                                                                 strokeLinecap="round"
-                                                                                 strokeLinejoin="round">
-                                                                                <polyline points="3 6 5 6 21 6"/>
-                                                                                <path
-                                                                                    d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                                                                                <path d="M10 11v6"/>
-                                                                                <path d="M14 11v6"/>
-                                                                                <path
-                                                                                    d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                                                                            </svg>
-                                                                        </button>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-
-                                                            <h3 className="text-base font-semibold leading-tight mb-1 line-clamp-2">{b.title}</h3>
-
-                                                            <div
-                                                                className="mt-2 grid grid-cols-2 gap-2 text-sm text-zinc-600 dark:text-zinc-300">
-                                                                <div
-                                                                    className="rounded-xl bg-zinc-100 dark:bg-[color:var(--d-panel)] p-2">
-                                                                    <div
-                                                                        className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Комната
-                                                                    </div>
-                                                                    <div className="font-medium">{b.room}</div>
-                                                                </div>
-                                                                <div
-                                                                    className="rounded-xl bg-zinc-100 dark:bg-[color:var(--d-panel)] p-2">
-                                                                    <div
-                                                                        className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Telegram
-                                                                    </div>
-                                                                    <div
-                                                                        className="font-medium break-all">{b.telegramId}</div>
-                                                                </div>
-                                                            </div>
-
-                                                            <div className="mt-4 mb-1">
-                                                                <div
-                                                                    className="h-2 rounded-full bg-zinc-200 dark:bg-[color:var(--d-panel)] w-full overflow-hidden">
-                                                                    {active && (
-                                                                        <div
-                                                                            className="h-full bg-blue-500 transition-[width] duration-500"
-                                                                            style={{width: `${progress}%`}}
-                                                                            title={`Прогресс: ${msToHuman(nowTs - s)} из ${msToHuman(total)}`}
-                                                                        />
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        </article>
-                                                    );
-
-                                                    return b.description ? (
-                                                        <HoverHint key={b.id} hint="Нажмите, чтобы увидеть описание">
-                                                            {card}
-                                                        </HoverHint>
-                                                    ) : (
-                                                        <div key={b.id}>{card}</div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </section>
-
-                            {futureCount === 0 && (
-                                <div className="mt-4 text-sm text-zinc-600 dark:text-zinc-400">
-                                    {roomFilter === "all" && visFilter === "all" ? "На заданный период брони не обнаружены." : "По заданному фильтру брони не найдены."}
-                                </div>
-                            )}
-                        </>
-                    ) : (
-                        <BookingsTableView
-                            dayKey={fromDate}
-                            bookings={sorted}
-                            onInspect={(b: Bookings) => setInspect(b)}
-                        />
-                    )}
-                </div>
-            </main>
-
-            <Modal open={!!inspect} onClose={() => setInspect(null)}>
-                {inspect && (
-                    <div className="space-y-3">
-                        <div className="text-lg font-semibold">{inspect.title}</div>
-                        <div
-                            className="text-sm text-zinc-600 dark:text-zinc-300">{fmtRange(inspect.start, inspect.end)}</div>
-                        <div className="grid grid-cols-2 gap-2 text-sm">
-                            <div className="rounded-xl bg-zinc-100 p-2 dark:bg-[color:var(--d-panel)]">
-                                <div
-                                    className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Комната
-                                </div>
-                                <div className="font-medium">{inspect.room}</div>
-                            </div>
-                            <div className="rounded-xl bg-zinc-100 p-2 dark:bg-[color:var(--d-panel)]">
-                                <div
-                                    className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Telegram
-                                </div>
-                                <div className="font-medium break-all">{inspect.telegramId}</div>
-                            </div>
-                        </div>
-                        {inspect.description && (
-                            <div
-                                className="rounded-xl border border-zinc-200/70 p-3 text-[14px] leading-5 dark:border-[color:var(--d-border)]">{inspect.description}</div>
-                        )}
-                    </div>
-                )}
-            </Modal>
-            <AdminModal open={adminOpen} onClose={() => setAdminOpen(false)} onLogin={(t) => admin.login(t)}/>
-            <RulesModal open={rulesOpen} onClose={() => setRulesOpen(false)}/>
+      {showCalendar && (
+        <div className="overflow-x-auto flex justify-center">
+          <div className="mx-auto max-w-fit">
+            <DatePicker value={value} onChange={(v) => { onChange(v); setShowCalendar(false); }} />
+          </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+interface BookingWizardProps {
+  activeRooms: RoomInfo[];
+  onSubmit: (form: WizardForm) => Promise<void>;
+  onCancel: () => void;
+  formLoading: boolean;
+  formError: string;
+  initialBooking?: Booking;
+}
+
+function BookingWizard({ activeRooms, onSubmit, onCancel, formLoading, formError, initialBooking }: BookingWizardProps) {
+  const topRef = useRef<HTMLDivElement>(null);
+  const now = new Date();
+
+  const defaultForm: WizardForm = initialBooking ? (() => {
+    const s = new Date(initialBooking.start);
+    const e = new Date(initialBooking.end);
+    return {
+      date: toYMD(s),
+      startH: s.getHours(),
+      startM: s.getMinutes(),
+      endH: e.getHours(),
+      endM: e.getMinutes(),
+      room: initialBooking.room,
+      title: initialBooking.title,
+      description: initialBooking.description ?? "",
+      isPrivate: initialBooking.isPrivate,
+      telegramId: initialBooking.telegramId ?? "",
+    };
+  })() : {
+    date: toYMD(now),
+    startH: now.getHours() + 1,
+    startM: 0,
+    endH: now.getHours() + 2,
+    endM: 0,
+    room: activeRooms[0]?.number ?? null,
+    title: "",
+    description: "",
+    isPrivate: true,
+    telegramId: localStorage.getItem("savedTelegramId") ?? "",
+  };
+
+  const [form, setForm] = useState<WizardForm>(defaultForm);
+  const [extraOpen, setExtraOpen] = useState(false);
+
+  // Scroll to top of modal when error appears
+  useEffect(() => {
+    if (!formError) return;
+    let el = topRef.current?.parentElement;
+    while (el) {
+      const s = getComputedStyle(el);
+      if (s.overflowY === "auto" || s.overflowY === "scroll") {
+        el.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      el = el.parentElement;
+    }
+  }, [formError]);
+
+  // Duration
+  const startMins = form.startH * 60 + form.startM;
+  const endMins = form.endH * 60 + form.endM;
+  const durationMs = (endMins - startMins) * 60000;
+  const durationValid = endMins > startMins;
+
+  // Format selected date for summary
+  const selectedDate = form.date ? (() => {
+    const d = fromYMD(form.date);
+    return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
+  })() : null;
+
+  const selectedRoom = form.room !== null
+    ? activeRooms.find(r => r.number === form.room)
+    : null;
+
+  return (
+    <div className="space-y-5 pt-2" ref={topRef}>
+      <div className="text-lg font-semibold" style={{ color: "var(--d-primary-h)" }}>
+        {initialBooking ? "Редактировать бронирование" : "Новое бронирование"}
+      </div>
+
+      {isQuiet(new Date()) && (
+        <div className="banner-warn">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <span>Сейчас тихий час. Убедитесь, что выбранное время разрешено.</span>
+        </div>
+      )}
+
+      {formError && (
+        <div className="banner-error">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>{formError}</span>
+        </div>
+      )}
+
+      {/* ── Step 1: Room ─────────────────────────────────────────────────── */}
+      <div className="rounded-2xl border p-4 space-y-3" style={{ background: "var(--d-panel)", borderColor: "var(--d-border)" }}>
+        <StepLabel n={1} label="Выберите комнату" />
+        <div className="flex flex-wrap gap-2">
+          {activeRooms.map(r => {
+            const active = form.room === r.number;
+            return (
+              <button
+                key={r.number}
+                type="button"
+                onClick={() => setForm(f => ({ ...f, room: r.number }))}
+                className="px-3 py-2 rounded-xl border text-sm font-medium transition-all duration-200"
+                style={active ? {
+                  background: "var(--d-primary)",
+                  borderColor: "var(--d-primary)",
+                  color: "white",
+                } : {
+                  background: "var(--d-surface)",
+                  borderColor: "var(--d-border)",
+                  color: "var(--d-text)",
+                }}
+              >
+                {r.name || `Комната ${r.number}`}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Step 2: Date ─────────────────────────────────────────────────── */}
+      <div className="rounded-2xl border p-4 space-y-3" style={{ background: "var(--d-panel)", borderColor: "var(--d-border)" }}>
+        <StepLabel n={2} label="Выберите дату" />
+        <WizardDateStrip value={form.date} onChange={(v) => setForm(f => ({ ...f, date: v }))} />
+      </div>
+
+      {/* ── Step 3: Time ─────────────────────────────────────────────────── */}
+      <div className="rounded-2xl border p-4 space-y-3" style={{ background: "var(--d-panel)", borderColor: "var(--d-border)" }}>
+        <StepLabel n={3} label="Выберите время" />
+        <div className="grid grid-cols-2 gap-4">
+          <TimePicker
+            label="Начало"
+            dateStr={form.date}
+            value={`${pad2(form.startH)}:${pad2(form.startM)}`}
+            onChange={(hm) => {
+              const [h, m] = hm.split(":").map(Number);
+              setForm(f => ({ ...f, startH: h, startM: m }));
+            }}
+          />
+          <TimePicker
+            label="Конец"
+            dateStr={form.date}
+            value={`${pad2(form.endH)}:${pad2(form.endM)}`}
+            onChange={(hm) => {
+              const [h, m] = hm.split(":").map(Number);
+              setForm(f => ({ ...f, endH: h, endM: m }));
+            }}
+          />
+        </div>
+        {/* Duration indicator */}
+        <div className="text-sm" style={{ color: durationValid ? "var(--d-text-sec)" : "var(--d-error)" }}>
+          {durationValid
+            ? `⏱ ${msToHuman(durationMs)}`
+            : "⚠ Конец раньше начала"}
+        </div>
+      </div>
+
+      {/* ── Step 4: Event details ─────────────────────────────────────────── */}
+      <div className="rounded-2xl border p-4 space-y-3" style={{ background: "var(--d-panel)", borderColor: "var(--d-border)" }}>
+        <StepLabel n={4} label="Опишите мероприятие" />
+
+        <label className="flex flex-col gap-1 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="lbl">Название *</span>
+            <span className="text-xs" style={{ color: form.title.length >= 60 ? "var(--d-error)" : "var(--d-text-muted)" }}>
+              {form.title.length}/80
+            </span>
+          </div>
+          <input
+            className="field"
+            maxLength={80}
+            value={form.title}
+            onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))}
+            placeholder="Кино, настолки, репетиция…"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="lbl">Telegram для связи *</span>
+            <span className="text-xs" style={{ color: form.telegramId.length >= 28 ? "var(--d-error)" : "var(--d-text-muted)" }}>
+              {form.telegramId.length}/32
+            </span>
+          </div>
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--d-text-muted)]">@</span>
+            <input
+              className="field pl-7"
+              maxLength={32}
+              placeholder="username"
+              value={form.telegramId}
+              onChange={e => setForm(f => ({ ...f, telegramId: e.target.value.replace(/^@/, '') }))}
+            />
+          </div>
+        </label>
+
+        {/* Private/public toggle — segment control */}
+        <div>
+          <span className="lbl block mb-1.5">Тип</span>
+          <div
+            className="inline-flex rounded-xl p-1 gap-1"
+            style={{ background: "var(--d-panel)" }}
+          >
+            <button
+              type="button"
+              onClick={() => setForm(f => ({ ...f, isPrivate: false }))}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200"
+              style={!form.isPrivate ? {
+                background: "var(--d-primary)",
+                color: "white",
+              } : {
+                background: "transparent",
+                color: "var(--d-text-muted)",
+              }}
+            >
+              <Unlock className="h-3.5 w-3.5" />
+              Публичное
+            </button>
+            <button
+              type="button"
+              onClick={() => setForm(f => ({ ...f, isPrivate: true }))}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200"
+              style={form.isPrivate ? {
+                background: "var(--d-primary)",
+                color: "white",
+              } : {
+                background: "transparent",
+                color: "var(--d-text-muted)",
+              }}
+            >
+              <Lock className="h-3.5 w-3.5" />
+              Частное
+            </button>
+          </div>
+        </div>
+
+        {/* Collapsible "Дополнительно" — CSS grid accordion */}
+        <div>
+          <button
+            type="button"
+            className="flex items-center gap-1 text-xs font-medium transition-colors"
+            style={{ color: "var(--d-text-muted)" }}
+            onClick={() => setExtraOpen(v => !v)}
+          >
+            <ChevronRight
+              className="h-3.5 w-3.5 transition-transform duration-200"
+              style={{ transform: extraOpen ? "rotate(90deg)" : "none" }}
+            />
+            Дополнительно
+          </button>
+          <div className={`accordion-body${extraOpen ? " open" : ""}`}>
+            <div>
+              <label className="flex flex-col gap-1 text-sm pt-2">
+                <span className="lbl">Описание</span>
+                <div className="relative">
+                  <textarea
+                    className="field resize-none"
+                    rows={3}
+                    maxLength={300}
+                    value={form.description}
+                    onChange={(e) => setForm(f => ({ ...f, description: e.target.value }))}
+                    placeholder="Дополнительная информация (необязательно)"
+                  />
+                  <span
+                    className="absolute bottom-2 right-2 text-xs pointer-events-none"
+                    style={{ color: "var(--d-text-muted)" }}
+                  >
+                    {form.description.length}/300
+                  </span>
+                </div>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Summary block ─────────────────────────────────────────────────── */}
+      <div
+        className="rounded-xl p-4 space-y-1.5 text-sm border-l-4"
+        style={{
+          background: "var(--d-panel)",
+          borderLeftColor: "var(--d-primary)",
+          border: "1px solid var(--d-border)",
+          borderLeft: "4px solid var(--d-primary)",
+        }}
+      >
+        <div className="font-semibold text-xs uppercase tracking-wide mb-2" style={{ color: "var(--d-text-muted)" }}>
+          Ваше бронирование
+        </div>
+        <div className="flex gap-2">
+          <span style={{ color: "var(--d-text-muted)" }}>Комната:</span>
+          <span style={{ color: "var(--d-text)" }}>
+            {selectedRoom ? (selectedRoom.name || `Комната ${selectedRoom.number}`) : <em style={{ color: "var(--d-text-muted)" }}>не выбрано</em>}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <span style={{ color: "var(--d-text-muted)" }}>Дата:</span>
+          <span style={{ color: "var(--d-text)" }}>
+            {selectedDate ?? <em style={{ color: "var(--d-text-muted)" }}>не выбрано</em>}
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <span style={{ color: "var(--d-text-muted)" }}>Время:</span>
+          <span style={{ color: "var(--d-text)" }}>
+            {durationValid
+              ? `${pad2(form.startH)}:${pad2(form.startM)} – ${pad2(form.endH)}:${pad2(form.endM)} (${msToHuman(durationMs)})`
+              : <em style={{ color: "var(--d-text-muted)" }}>не выбрано</em>}
+          </span>
+        </div>
+        {form.title && (
+          <div className="flex gap-2 min-w-0 overflow-hidden">
+            <span className="shrink-0" style={{ color: "var(--d-text-muted)" }}>Название:</span>
+            <span className="truncate min-w-0" style={{ color: "var(--d-text)" }}>{form.title}</span>
+          </div>
+        )}
+        {form.telegramId && (
+          <div className="flex gap-2 min-w-0 overflow-hidden">
+            <span className="shrink-0" style={{ color: "var(--d-text-muted)" }}>Telegram:</span>
+            <span className="truncate min-w-0" style={{ color: "var(--d-text)" }}>@{form.telegramId}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Actions ───────────────────────────────────────────────────────── */}
+      <div className="flex flex-col gap-2 pt-1">
+        <div className="flex gap-2">
+          <button
+            className="btn btn-primary"
+            onClick={() => onSubmit(form)}
+            disabled={formLoading}
+          >
+            {formLoading
+              ? (initialBooking ? "Сохранение…" : "Создание…")
+              : (initialBooking ? "Сохранить" : "Забронировать")}
+          </button>
+          <button className="btn" onClick={onCancel}>
+            Отмена
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ──────────────────────────────────────────────────────────────────
+export function App() {
+  const auth = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [myBookings, setMyBookings] = useState(false);
+
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [roomFilter, setRoomFilter] = useState<RoomFilter>("all");
+  const [visFilter, setVisFilter] = useState<VisFilter>("all");
+  const [view, setView] = useState<ViewMode>("cards");
+  const [filterDate, setFilterDate] = useState<string>(() => toYMD(new Date()));
+
+  // View transition state
+  const [viewTransition, setViewTransition] = useState(false);
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [inspectBooking, setInspectBooking] = useState<Booking | null>(null);
+  const [editBooking, setEditBooking] = useState<Booking | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [page, setPage] = useState<"main" | "rooms">("main");
+
+  const [formError, setFormError] = useState("");
+  const [formLoading, setFormLoading] = useState(false);
+
+  // silent=true: update data without showing the skeleton loading state.
+  async function loadBookings(silent = false) {
+    if (!silent) setLoading(true);
+    try { setBookings(await api.fetchBookings()); }
+    finally { if (!silent) setLoading(false); }
+  }
+
+  async function loadRooms() {
+    if (auth.isAuth) {
+      try {
+        const data = await fetchRooms();
+        setRooms(data);
+      } catch (e: unknown) {
+        console.error("[App] loadRooms:", e);
+      }
+    }
+  }
+
+  useEffect(() => { loadBookings(); }, []);
+
+  // Reload bookings on auth change (login/logout) so canManage is fresh
+  useEffect(() => {
+    if (auth.user !== undefined) loadBookings();
+  }, [auth.isAuth]);
+
+  useEffect(() => { loadRooms(); }, [auth.isAuth]);
+
+  // SSE: instant updates whenever any client mutates bookings.
+  // Falls back to a slow 5-minute poll if the stream is unavailable.
+  useEffect(() => {
+    const source = new EventSource("/api/bookings/events");
+    source.addEventListener("update", () => loadBookings(true));
+    // 5-minute silent fallback poll
+    const fallback = setInterval(() => loadBookings(true), 5 * 60_000);
+    // Refresh on tab re-focus (handles long backgrounded tabs)
+    const onVisible = () => { if (document.visibilityState === "visible") loadBookings(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      source.close();
+      clearInterval(fallback);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  const ROOM_ORDER = [21, 256, 132, 2812, 3812];
+  const activeRooms = useMemo(() =>
+    rooms.filter(r => r.isActive).sort((a, b) => {
+      const ai = ROOM_ORDER.indexOf(a.number);
+      const bi = ROOM_ORDER.indexOf(b.number);
+      if (ai === -1 && bi === -1) return a.number - b.number;
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    }),
+  [rooms]);
+
+  const todayStart = useMemo(() => {
+    const d = new Date(); d.setHours(0, 0, 0, 0); return d;
+  }, []);
+
+  const filtered = useMemo(() => {
+    const myEmail = auth.user?.email;
+    return bookings.filter((b) => {
+      const bStart = new Date(b.start);
+      if (filterDate === PAST_DATES) {
+        // Only bookings from days strictly before today
+        if (bStart >= todayStart) return false;
+      } else if (filterDate === ALL_DATES) {
+        // Hide days strictly before today; today's bookings always visible
+        if (bStart < todayStart) return false;
+      } else {
+        // Specific date
+        const dayStart = fromYMD(filterDate);
+        const dayEnd = new Date(dayStart);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+        if (bStart < dayStart || bStart >= dayEnd) return false;
+      }
+      if (roomFilter !== "all" && b.room !== roomFilter) return false;
+      if (visFilter === "public" && b.isPrivate) return false;
+      if (visFilter === "private" && !b.isPrivate) return false;
+      if (myBookings && b.userEmail !== myEmail) return false;
+      return true;
+    });
+  }, [bookings, filterDate, roomFilter, visFilter, myBookings, auth.user, todayStart]);
+
+  function handleViewChange(v: ViewMode) {
+    setViewTransition(true);
+    if (v === "table" && (filterDate === ALL_DATES || filterDate === PAST_DATES)) {
+      setFilterDate(toYMD(new Date()));
+    }
+    setTimeout(() => { setView(v); setViewTransition(false); }, 150);
+  }
+
+  async function handleCreate(form: {
+    date: string; startH: number; startM: number; endH: number; endM: number;
+    room: number | null; title: string; description: string; isPrivate: boolean; telegramId: string;
+  }) {
+    setFormError("");
+
+    if (form.room === null) { setFormError("Выберите комнату"); return; }
+    if (!form.title.trim()) { setFormError("Укажите название"); return; }
+    if (!form.telegramId.trim()) { setFormError("Укажите Telegram для связи"); return; }
+
+    const day = fromYMD(form.date);
+    const start = new Date(day);
+    start.setHours(form.startH, form.startM, 0, 0);
+    const end = new Date(day);
+    end.setHours(form.endH, form.endM, 0, 0);
+
+    if (end <= start) { setFormError("Конец должен быть позже начала"); return; }
+
+    setFormLoading(true);
+    const selectedRoom = activeRooms.find(r => r.number === form.room) ?? activeRooms[0];
+    if (!selectedRoom) { setFormError("Нет доступных комнат для бронирования"); setFormLoading(false); return; }
+
+    try {
+      const payload: CreateBookingPayload = {
+        start: start.toISOString(),
+        end: end.toISOString(),
+        room: selectedRoom.number,
+        title: form.title.trim(),
+        description: form.description.trim() || undefined,
+        isPrivate: form.isPrivate,
+        telegram_id: form.telegramId.trim() || undefined,
+      };
+      const created = await api.createBooking(payload);
+      if (form.telegramId.trim()) localStorage.setItem("savedTelegramId", form.telegramId.trim());
+      // Optimistically add to state — SSE will sync the rest seamlessly.
+      setBookings(prev => [...prev, created]);
+      setAddOpen(false);
+      setFormError("");
+    } catch (e: unknown) {
+      const msg = normalizeApiError(e);
+      if (msg.includes("409") || msg.toLowerCase().includes("conflict") || msg.toLowerCase().includes("overlap")) {
+        setFormError("Такое время уже занято");
+      } else {
+        setFormError(msg);
+      }
+      console.error("[App] createBooking:", e);
+    } finally {
+      setFormLoading(false);
+    }
+  }
+
+  function requestDelete(id: string) {
+    setConfirmDeleteId(id);
+  }
+
+  async function handleDelete(id: string) {
+    setConfirmDeleteId(null);
+    // Optimistic: remove immediately, revert on error.
+    setBookings(bs => bs.filter(b => b.id !== id));
+    if (inspectBooking?.id === id) setInspectBooking(null);
+    try {
+      await api.deleteBooking(id);
+    } catch (e: unknown) {
+      loadBookings(true);
+      console.error("[App] deleteBooking:", e);
+    }
+  }
+
+  async function handleUpdate(form: {
+    date: string; startH: number; startM: number; endH: number; endM: number;
+    room: number | null; title: string; description: string; isPrivate: boolean; telegramId: string;
+  }) {
+    if (!editBooking) return;
+    setFormError("");
+
+    if (form.room === null) { setFormError("Выберите комнату"); return; }
+    if (!form.title.trim()) { setFormError("Укажите название"); return; }
+
+    const day = fromYMD(form.date);
+    const start = new Date(day);
+    start.setHours(form.startH, form.startM, 0, 0);
+    const end = new Date(day);
+    end.setHours(form.endH, form.endM, 0, 0);
+    if (end <= start) { setFormError("Конец должен быть позже начала"); return; }
+
+    setFormLoading(true);
+    try {
+      const updated = await api.updateBooking(editBooking.id, {
+        start: start.toISOString(),
+        end: end.toISOString(),
+        room: form.room,
+        title: form.title.trim(),
+        description: form.description.trim() || undefined,
+        isPrivate: form.isPrivate,
+        telegram_id: form.telegramId.trim() || undefined,
+      });
+      if (form.telegramId.trim()) localStorage.setItem("savedTelegramId", form.telegramId.trim());
+      setBookings(bs => bs.map(b => b.id === updated.id ? updated : b));
+      setEditBooking(null);
+      setFormError("");
+    } catch (e: unknown) {
+      const msg = normalizeApiError(e);
+      if (msg.includes("409") || msg.toLowerCase().includes("conflict") || msg.toLowerCase().includes("overlap")) {
+        setFormError("Такое время уже занято");
+      } else {
+        setFormError(msg);
+      }
+      console.error("[App] updateBooking:", e);
+    } finally {
+      setFormLoading(false);
+    }
+  }
+
+  if (page === "rooms") {
+    return (
+      <div className="page-slide-in">
+      <RoomsPage
+        onBack={() => setPage("main")}
+        onBook={() => {
+          setPage("main");
+          if (!auth.isAuth) { setAuthOpen(true); return; }
+          setAddOpen(true);
+        }}
+      />
+      </div>
     );
+  }
+
+  const contentKey = `${filterDate}-${String(roomFilter)}-${visFilter}-${myBookings}`;
+
+  return (
+    <div className="min-h-screen" style={{ background: "var(--d-bg)" }}>
+      <AppHeader
+        view={view}
+        user={auth.user}
+        myBookings={myBookings}
+        onToggleAdd={() => {
+          if (!auth.isAuth) { setAuthOpen(true); return; }
+          setAddOpen(true);
+        }}
+        onToggleView={handleViewChange}
+        onToggleMyBookings={() => setMyBookings(m => !m)}
+        onLoginClick={() => setAuthOpen(true)}
+        onAdminClick={() => setAdminOpen(true)}
+        onLogout={auth.logout}
+        onRulesClick={() => setRulesOpen(true)}
+        onRoomsClick={() => setPage("rooms")}
+      />
+
+      <main className="mx-auto max-w-6xl px-4 py-6 space-y-6">
+        {/* Filters */}
+        <div className="flex flex-col gap-3">
+          <DateFilter
+            value={filterDate}
+            onChange={setFilterDate}
+            hideAllDates={view === "table"}
+          />
+
+          {/* Room filter buttons — hidden in table mode */}
+          {activeRooms.length > 0 && view !== "table" && (
+            <div className="flex flex-wrap gap-2 items-center">
+              <span className="lbl mr-1">Комната:</span>
+              <button
+                className={cn("btn-filter", roomFilter === "all" && "active")}
+                onClick={() => setRoomFilter("all")}
+              >
+                Все
+              </button>
+              {activeRooms.map(r => (
+                <button
+                  key={r.number}
+                  className={cn("btn-filter", roomFilter === r.number && "active")}
+                  onClick={() => setRoomFilter(r.number)}
+                >
+                  {r.name || `Комната ${r.number}`}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="lbl mr-1">Тип:</span>
+            {(["all", "public", "private"] as VisFilter[]).map(opt => (
+              <button
+                key={opt}
+                className={cn("btn-filter", visFilter === opt && "active")}
+                onClick={() => setVisFilter(opt)}
+              >
+                {opt === "all" ? "Все" : opt === "public" ? "Публичные" : "Частные"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Content with transition */}
+        <div
+          style={{
+            transition: "opacity 0.18s ease-out, transform 0.18s ease-out",
+            opacity: viewTransition ? 0 : 1,
+            transform: viewTransition ? "translateY(6px) scale(0.99)" : "none",
+          }}
+        >
+          {view === "table" && (
+            <BookingsTableView
+              dayKey={filterDate}
+              bookings={filtered}
+              onInspect={setInspectBooking}
+            />
+          )}
+
+          {view === "cards" && (() => {
+            if (loading) {
+              return (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="h-36 rounded-2xl animate-pulse" style={{ background: "var(--d-border)" }} />
+                  ))}
+                </div>
+              );
+            }
+            if (filtered.length === 0) {
+              return (
+                <div className="text-center py-16 text-sm" style={{ color: "var(--d-text-muted)" }}>
+                  Нет бронирований на выбранный день
+                </div>
+              );
+            }
+            if (filterDate !== ALL_DATES && filterDate !== PAST_DATES) {
+              return (
+                <div key={contentKey} className="content-fade-in grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {filtered.map((b, i) => (
+                    <div
+                      key={b.id}
+                      className="card-enter"
+                      style={{ animationDelay: `${Math.min(i * 35, 210)}ms` }}
+                    >
+                      <BookingCard
+                        booking={b}
+                        onDelete={b.canManage ? () => requestDelete(b.id) : undefined}
+                        onInspect={() => setInspectBooking(b)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+            // "Все даты" / "История" — grouped by date with headers
+            const groups = new Map<string, typeof filtered>();
+            for (const b of filtered) {
+              const key = toYMD(new Date(b.start));
+              if (!groups.has(key)) groups.set(key, []);
+              groups.get(key)!.push(b);
+            }
+            // History shows newest first; future shows oldest first
+            const sortedKeys = [...groups.keys()].sort(
+              filterDate === PAST_DATES ? (a, b) => b.localeCompare(a) : undefined
+            );
+            const todayStr = toYMD(new Date());
+            const tomorrowDate = new Date();
+            tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+            const tomorrowStr = toYMD(tomorrowDate);
+            let cardIdx = 0;
+            return (
+              <div key={contentKey} className="content-fade-in space-y-6">
+                {sortedKeys.map((key, gi) => {
+                  const dateObj = new Date(key + "T00:00:00");
+                  const dayMonth = dateObj.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+                  const label = key === todayStr
+                    ? `Сегодня, ${dayMonth}`
+                    : key === tomorrowStr
+                    ? `Завтра, ${dayMonth}`
+                    : dayMonth;
+                  return (
+                    <div
+                      key={key}
+                      className="space-y-3 card-enter"
+                      style={{ animationDelay: `${gi * 55}ms` }}
+                    >
+                      <div className="text-sm font-semibold capitalize" style={{ color: "var(--d-text-sec)" }}>
+                        {label}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {groups.get(key)!.map(b => {
+                          const delay = Math.min(cardIdx++ * 30, 240);
+                          return (
+                            <div key={b.id} className="card-enter" style={{ animationDelay: `${delay}ms` }}>
+                              <BookingCard
+                                booking={b}
+                                onDelete={b.canManage ? () => requestDelete(b.id) : undefined}
+                                onInspect={() => setInspectBooking(b)}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      </main>
+
+      {/* Auth modal */}
+      <AuthModal
+        open={authOpen}
+        onClose={() => setAuthOpen(false)}
+        onSuccess={() => {
+          auth.refresh();
+          setAuthOpen(false);
+        }}
+      />
+
+      {/* Admin panel */}
+      <AdminPanel
+        open={adminOpen}
+        onClose={() => setAdminOpen(false)}
+        isSuperAdmin={auth.isSuperAdmin}
+        onForcePushSuccess={() => { setAdminOpen(false); loadBookings(); }}
+      />
+
+      {/* Rules modal */}
+      <RulesModal open={rulesOpen} onClose={() => setRulesOpen(false)} />
+
+      {/* Create booking modal — 4-step wizard */}
+      <Modal open={addOpen} onClose={() => { setAddOpen(false); setFormError(""); }}>
+        <BookingWizard
+          activeRooms={activeRooms}
+          onSubmit={handleCreate}
+          onCancel={() => { setAddOpen(false); setFormError(""); }}
+          formLoading={formLoading}
+          formError={formError}
+        />
+      </Modal>
+
+      {/* Inspect booking modal */}
+      {inspectBooking && (
+        <Modal open={!!inspectBooking} onClose={() => setInspectBooking(null)}>
+          <div className="space-y-3 min-w-0 overflow-hidden">
+            <div
+              className="text-lg font-semibold leading-snug break-words"
+              style={{ color: "var(--d-primary-h)" }}
+            >
+              {inspectBooking.title.slice(0, 120)}{inspectBooking.title.length > 120 ? "…" : ""}
+            </div>
+            <div className="text-sm" style={{ color: "var(--d-text-sec)" }}>
+              Комната {displayRoom(inspectBooking.room)} ·{" "}
+              {fmtRange(inspectBooking.start, inspectBooking.end)}
+            </div>
+            {inspectBooking.isPrivate && (
+              <div className="flex items-center gap-1.5 text-sm" style={{ color: "var(--d-secondary)" }}>
+                <Lock className="h-3.5 w-3.5" /> Частное
+              </div>
+            )}
+            {inspectBooking.description && (
+              <p className="text-sm leading-relaxed break-words" style={{ color: "var(--d-text)" }}>{inspectBooking.description}</p>
+            )}
+            {inspectBooking.telegramId && (
+              <div className="flex items-center gap-1.5 text-sm overflow-hidden" style={{ color: "var(--d-text-muted)" }}>
+                <Send className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate min-w-0">
+                  @{inspectBooking.telegramId.slice(0, 40)}{inspectBooking.telegramId.length > 40 ? "…" : ""}
+                </span>
+              </div>
+            )}
+            {inspectBooking.userEmail && (
+              <div className="text-xs truncate" style={{ color: "var(--d-text-muted)" }}>
+                Автор: {inspectBooking.userEmail}
+              </div>
+            )}
+            {inspectBooking.canManage && (
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  className="btn btn-primary text-sm"
+                  onClick={() => { setEditBooking(inspectBooking); setInspectBooking(null); setFormError(""); }}
+                >
+                  Редактировать
+                </button>
+                <button
+                  className="btn text-sm"
+                  style={{ color: "var(--d-error)" }}
+                  onClick={() => requestDelete(inspectBooking.id)}
+                >
+                  Удалить
+                </button>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete confirmation modal */}
+      <Modal open={!!confirmDeleteId} onClose={() => setConfirmDeleteId(null)}>
+        {confirmDeleteId && (() => {
+          const bk = bookings.find(b => b.id === confirmDeleteId);
+          return (
+            <div className="space-y-5">
+              <div>
+                <h2 className="text-lg font-bold mb-1" style={{ color: "var(--d-text)" }}>
+                  Удалить бронирование?
+                </h2>
+                {bk && (
+                  <p className="text-sm" style={{ color: "var(--d-text-muted)" }}>
+                    {new Date(bk.start).toLocaleString("ru", { day: "2-digit", month: "long", hour: "2-digit", minute: "2-digit" })}
+                    {" – "}
+                    {new Date(bk.end).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" })}
+                    {" · "}{bk.title}
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <button
+                  className="btn flex-1"
+                  onClick={() => setConfirmDeleteId(null)}
+                >
+                  Отмена
+                </button>
+                <button
+                  className="btn flex-1 font-semibold"
+                  style={{ background: "var(--d-error)", color: "#fff", borderColor: "var(--d-error)" }}
+                  onClick={() => handleDelete(confirmDeleteId)}
+                >
+                  Да, удалить
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Edit booking modal */}
+      <Modal open={!!editBooking} onClose={() => { setEditBooking(null); setFormError(""); }}>
+        {editBooking && (
+          <BookingWizard
+            activeRooms={activeRooms}
+            onSubmit={handleUpdate}
+            onCancel={() => { setEditBooking(null); setFormError(""); }}
+            formLoading={formLoading}
+            formError={formError}
+            initialBooking={editBooking}
+          />
+        )}
+      </Modal>
+    </div>
+  );
 }

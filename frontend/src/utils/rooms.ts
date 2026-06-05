@@ -1,9 +1,23 @@
 import type { Room } from "../types/bookings";
 
-export const ROOM_ORDER: Room[] = [21, 256, 132];
-
-export const ROOM_COLORS: Record<Room, { hex: string; ring: string; bg: string }> = {
-    21: { hex: "#a78bfa", ring: "ring-violet-400/60", bg: "bg-violet-500/18" },
-    256: { hex: "#f59e0b", ring: "ring-amber-400/60", bg: "bg-amber-500/18" },
-    132: { hex: "#34d399", ring: "ring-emerald-400/60", bg: "bg-emerald-500/18" },
+// Nature/forest palette for rooms
+export const ROOM_COLORS: Record<number, { hex: string; ring: string; bg: string }> = {
+  21:   { hex: "#578f64", ring: "ring-[#578f64]/60",  bg: "bg-[#578f64]/[0.12]" },  // green (TV room)
+  132:  { hex: "#869c27", ring: "ring-[#869c27]/60",  bg: "bg-[#869c27]/[0.12]" },  // olive (couch room)
+  256:  { hex: "#795638", ring: "ring-[#795638]/60",  bg: "bg-[#795638]/[0.12]" },  // brown (piano room)
+  2812: { hex: "#c0915f", ring: "ring-[#c0915f]/60",  bg: "bg-[#c0915f]/[0.12]" },  // amber (coworking 2к)
+  3812: { hex: "#c1ac6c", ring: "ring-[#c1ac6c]/60",  bg: "bg-[#c1ac6c]/[0.12]" },  // gold (coworking 3к)
 };
+
+const PALETTE = [
+  { hex: "#5B7A3F", ring: "ring-[#5B7A3F]/60", bg: "bg-[#5B7A3F]/[0.12]" },
+  { hex: "#C49A5E", ring: "ring-[#C49A5E]/60", bg: "bg-[#C49A5E]/[0.12]" },
+  { hex: "#7A8569", ring: "ring-[#7A8569]/60", bg: "bg-[#7A8569]/[0.12]" },
+  { hex: "#3A5428", ring: "ring-[#3A5428]/60", bg: "bg-[#3A5428]/[0.12]" },
+  { hex: "#9B6B3E", ring: "ring-[#9B6B3E]/60", bg: "bg-[#9B6B3E]/[0.12]" },
+];
+
+export function getRoomColor(room: number) {
+  if (ROOM_COLORS[room]) return ROOM_COLORS[room];
+  return PALETTE[room % PALETTE.length];
+}

@@ -14,7 +14,7 @@ func newBooking() booking.Booking {
 	return booking.Booking{
 		Start:      time.Now(),
 		End:        time.Now().Add(time.Hour),
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "Test",
 		TelegramID: "123",
 	}

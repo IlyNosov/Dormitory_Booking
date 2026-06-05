@@ -50,13 +50,13 @@ export function DatePicker({
         <div className="w-[280px]">
             <div className="flex items-center justify-between mb-2">
                 <button className="icon-btn" onClick={prevMonth}>‹</button>
-                <div className="text-sm font-medium capitalize">
+                <div className="text-sm font-medium capitalize" style={{ color: "var(--d-text)" }}>
                     {RU_MONTHS[m]} {y}
                 </div>
                 <button className="icon-btn" onClick={nextMonth}>›</button>
             </div>
 
-            <div className="grid grid-cols-7 text-[11px] text-zinc-400 mb-1">
+            <div className="grid grid-cols-7 text-[11px] mb-1" style={{ color: "var(--d-text-muted)" }}>
                 {RU_WEEKDAYS.map((w) => (
                     <div key={w} className="h-6 flex items-center justify-center uppercase">{w}</div>
                 ))}
@@ -74,10 +74,16 @@ export function DatePicker({
                             onClick={() => onChange(toYMD(d))}
                             className={cn(
                                 "h-8 rounded-lg text-sm tnum transition select-none",
-                                isSel ? "bg-blue-600 text-white" : "hover:bg-zinc-800/60",
-                                cur ? "text-zinc-100" : "text-zinc-500",
-                                isToday && !isSel && "ring-1 ring-blue-400/60",
+                                isSel
+                                    ? "text-white"
+                                    : "hover:bg-[color:var(--d-border)]",
                             )}
+                            style={{
+                                background: isSel ? "var(--d-primary)" : undefined,
+                                color: isSel ? "#fff" : cur ? "var(--d-text)" : "var(--d-text-muted)",
+                                outline: isToday && !isSel ? "1px solid var(--d-primary)" : undefined,
+                                outlineOffset: "-1px",
+                            }}
                         >
                             {pad2(d.getDate())}
                         </button>

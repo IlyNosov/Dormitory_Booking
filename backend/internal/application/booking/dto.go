@@ -12,22 +12,36 @@ type BookingDTO struct {
 	End         time.Time `json:"end"`
 	Room        int       `json:"room"`
 	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"` // если пусто - фронт не увидит и не рисует кнопку "Подробнее"
+	Description string    `json:"description,omitempty"`
 	IsPrivate   bool      `json:"isPrivate"`
-	TelegramID  string    `json:"telegramId"`
+	UserEmail   string    `json:"userEmail,omitempty"`
+	TelegramID  string    `json:"telegramId,omitempty"`
 	CanManage   bool      `json:"canManage"`
 }
 
-func ToDTO(b domain.Booking, viewerID string, isAdmin bool) BookingDTO {
-	return BookingDTO{
-		ID:          b.ID,
-		Start:       b.Start,
-		End:         b.End,
-		Room:        int(b.Room),
-		Title:       b.Title,
-		Description: b.Description,
-		IsPrivate:   b.IsPrivate,
-		TelegramID:  b.TelegramID,
-		CanManage:   isAdmin || viewerID == b.TelegramID,
+func ToDTO(b domain.Booking, viewerEmail, viewerTG string, isAdmin bool) BookingDTO {
+	canManage := isAdmin ||
+		(viewerEmail != "" && b.UserEmail == viewerEmail) ||
+		(viewerTG != "" && b.TelegramID == viewerTG)
+
+	dto := BookingDTO{
+		ID:        b.ID,
+		Start:     b.Start,
+		End:       b.End,
+		Room:      b.Room,
+		Title:     b.Title,
+		IsPrivate: b.IsPrivate,
+		CanManage: canManage,
 	}
+	if b.Description != "" {
+		dto.Description = b.Description
+	}
+	// TelegramID is public — visible to everyone for contact purposes
+	if b.TelegramID != "" {
+		dto.TelegramID = b.TelegramID
+	}
+	if isAdmin || canManage {
+		dto.UserEmail = b.UserEmail
+	}
+	return dto
 }

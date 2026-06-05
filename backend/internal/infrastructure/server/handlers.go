@@ -1,129 +1,75 @@
 package server
 
-// В этом файле HTTP-обработчики для бронирований и простая админ-авторизация.
-
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	appbooking "Dormitory_Booking/internal/application/booking"
 	domain "Dormitory_Booking/internal/domain/booking"
+	"Dormitory_Booking/internal/infrastructure/mailer"
 )
 
-type Handlers struct {
-	svc           *appbooking.Service
-	adminPassword string
+type BookingHandlers struct {
+	svc         *appbooking.Service
+	mailer      *mailer.Mailer
+	hub         *Hub
+	bugNotifier BugNotifier
 }
 
-func normalizeTG(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "@")
-	s = strings.ToLower(s)
-	return s
+func NewBookingHandlers(svc *appbooking.Service, ml *mailer.Mailer, hub *Hub, bugNotifier BugNotifier) *BookingHandlers {
+	return &BookingHandlers{svc: svc, mailer: ml, hub: hub, bugNotifier: bugNotifier}
 }
 
-func NewHandlers(svc *appbooking.Service) *Handlers {
-	return &Handlers{
-		svc:           svc,
-		adminPassword: os.Getenv("ADMIN_PASSWORD"),
-	}
-}
-
-// Логин в админку
-
-func (h *Handlers) AdminLogin(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-
-	if h.adminPassword == "" || body.Password != h.adminPassword {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "admin_token",
-		Value:    "1",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	w.WriteHeader(http.StatusOK)
-}
-
-func (h *Handlers) AdminLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "admin_token",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	w.WriteHeader(http.StatusOK)
-}
-
-func (h *Handlers) isAdmin(r *http.Request) bool {
-	// 1) header token
-	if tok := r.Header.Get("X-Admin-Token"); tok != "" && tok == os.Getenv("ADMIN_TOKEN") {
-		return true
-	}
-	// 2) cookie
-	c, err := r.Cookie("admin_token")
-	return err == nil && c.Value == "1"
-}
-
-// Бронирования
-
-func (h *Handlers) GetAll(w http.ResponseWriter, r *http.Request) {
+func (h *BookingHandlers) GetAll(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.ListBookings(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	u, _ := userFromCtx(r)
+	isAdmin := isAdminFromCtx(r)
 
 	out := make([]appbooking.BookingDTO, 0, len(list))
 	for _, b := range list {
-		out = append(out, appbooking.ToDTO(b, "", h.isAdmin(r)))
+		out = append(out, appbooking.ToDTO(b, u.Email, "", isAdmin))
 	}
 	writeJSON(w, out)
 }
 
-func (h *Handlers) GetOne(w http.ResponseWriter, r *http.Request) {
+func (h *BookingHandlers) GetOne(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-
 	b, err := h.svc.GetBooking(r.Context(), id)
 	if err != nil {
-		if err == domain.ErrNotFound {
+		if errors.Is(err, domain.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	writeJSON(w, appbooking.ToDTO(b, "", h.isAdmin(r)))
+	u, _ := userFromCtx(r)
+	writeJSON(w, appbooking.ToDTO(b, u.Email, "", isAdminFromCtx(r)))
 }
 
-func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
+func (h *BookingHandlers) Create(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFromCtx(r)
+	if !ok {
+		http.Error(w, "требуется авторизация", http.StatusUnauthorized)
+		return
+	}
+
 	var body struct {
 		Start       string `json:"start"`
 		End         string `json:"end"`
 		Room        int    `json:"room"`
 		Title       string `json:"title"`
 		Description string `json:"description"`
-		TelegramID  string `json:"telegramId"`
 		IsPrivate   bool   `json:"isPrivate"`
+		TelegramID  string `json:"telegram_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -141,35 +87,60 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	input := appbooking.CreateBookingInput{
-		Start:       start,
-		End:         end,
-		Room:        domain.Room(body.Room),
-		Title:       body.Title,
-		Description: body.Description,
-		TelegramID:  body.TelegramID,
-		IsPrivate:   body.IsPrivate,
-	}
-
-	b, err := h.svc.CreateBooking(r.Context(), input)
+	b, err := h.svc.CreateBooking(r.Context(), appbooking.CreateBookingInput{
+		Start: start, End: end, Room: body.Room,
+		Title: body.Title, Description: body.Description,
+		UserEmail: u.Email, IsPrivate: body.IsPrivate,
+		TelegramID: body.TelegramID,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	writeJSON(w, appbooking.ToDTO(b, body.TelegramID, h.isAdmin(r)))
+	h.hub.Notify()
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, appbooking.ToDTO(b, u.Email, "", isAdminFromCtx(r)))
 }
 
-func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
+func (h *BookingHandlers) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	isAdmin := h.isAdmin(r)
-
-	requesterID := r.URL.Query().Get("tg")
-	if requesterID == "" {
-		requesterID = r.Header.Get("X-User-TelegramID")
+	u, ok := userFromCtx(r)
+	if !ok {
+		http.Error(w, "требуется авторизация", http.StatusUnauthorized)
+		return
 	}
 
-	err := h.svc.DeleteBooking(r.Context(), id, requesterID, isAdmin)
+	var body struct {
+		Start       string `json:"start"`
+		End         string `json:"end"`
+		Room        int    `json:"room"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		IsPrivate   bool   `json:"isPrivate"`
+		TelegramID  string `json:"telegram_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	start, err := time.Parse(time.RFC3339, body.Start)
+	if err != nil {
+		http.Error(w, "invalid start time", http.StatusBadRequest)
+		return
+	}
+	end, err := time.Parse(time.RFC3339, body.End)
+	if err != nil {
+		http.Error(w, "invalid end time", http.StatusBadRequest)
+		return
+	}
+
+	isAdmin := isAdminFromCtx(r)
+	b, err := h.svc.UpdateBooking(r.Context(), appbooking.UpdateBookingInput{
+		ID: id, Start: start, End: end, Room: body.Room,
+		Title: body.Title, Description: body.Description,
+		TelegramID: body.TelegramID, IsPrivate: body.IsPrivate,
+	}, u.Email, isAdmin)
 	if err != nil {
 		if errors.Is(err, domain.ErrForbidden) {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -182,7 +153,76 @@ func (h *Handlers) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	h.hub.Notify()
+	writeJSON(w, appbooking.ToDTO(b, u.Email, "", isAdmin))
+}
 
+// ForceCreate is admin-only: bypasses business rules.
+func (h *BookingHandlers) ForceCreate(w http.ResponseWriter, r *http.Request) {
+	u, _ := userFromCtx(r)
+
+	var body struct {
+		Start       string `json:"start"`
+		End         string `json:"end"`
+		Room        int    `json:"room"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		IsPrivate   bool   `json:"isPrivate"`
+		TelegramID  string `json:"telegram_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	start, err := time.Parse(time.RFC3339, body.Start)
+	if err != nil {
+		http.Error(w, "invalid start time", http.StatusBadRequest)
+		return
+	}
+	end, err := time.Parse(time.RFC3339, body.End)
+	if err != nil {
+		http.Error(w, "invalid end time", http.StatusBadRequest)
+		return
+	}
+
+	b, err := h.svc.CreateBooking(r.Context(), appbooking.CreateBookingInput{
+		Start: start, End: end, Room: body.Room,
+		Title: body.Title, Description: body.Description,
+		UserEmail: u.Email, IsPrivate: body.IsPrivate,
+		TelegramID: body.TelegramID,
+		Force: true,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.hub.Notify()
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, appbooking.ToDTO(b, u.Email, "", true))
+}
+
+func (h *BookingHandlers) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	u, _ := userFromCtx(r)
+	isAdmin := isAdminFromCtx(r)
+
+	tgID := r.Header.Get("X-User-TelegramID")
+
+	err := h.svc.DeleteBooking(r.Context(), id, u.Email, tgID, isAdmin)
+	if err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, domain.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.hub.Notify()
 	w.WriteHeader(http.StatusNoContent)
 }
 

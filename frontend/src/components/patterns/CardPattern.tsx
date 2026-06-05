@@ -4,6 +4,8 @@ import { cn } from "../../utils/cn";
 import { Pattern21 } from "./Pattern21";
 import { Pattern132 } from "./Pattern132";
 import { Pattern256 } from "./Pattern256";
+import { Pattern2812 } from "./Pattern2812";
+import { Pattern3812 } from "./Pattern3812";
 
 export function CardPattern({ room, active }: { room: Room; active?: boolean }) {
     return (
@@ -15,8 +17,12 @@ export function CardPattern({ room, active }: { room: Room; active?: boolean }) 
             viewBox="0 0 300 160"
             preserveAspectRatio="none"
         >
-            {room === 21 ? <Pattern21 /> : room === 132 ? <Pattern132 /> : <Pattern256 />}
+            {room === 21   ? <Pattern21 />   :
+             room === 132  ? <Pattern132 />  :
+             room === 256  ? <Pattern256 />  :
+             room === 2812 ? <Pattern2812 /> :
+             room === 3812 ? <Pattern3812 /> :
+             <Pattern21 />}
         </svg>
     );
 }
-

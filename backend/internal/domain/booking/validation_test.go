@@ -9,13 +9,12 @@ import (
 
 func TestValidateBasic_OK(t *testing.T) {
 	start := time.Now().Add(2 * time.Hour)
-	start = time.Date(start.Year(), start.Month(), start.Day(), 12, 0, 0, 0, time.Local)
 	end := start.Add(1 * time.Hour)
 
 	b := booking.Booking{
 		Start:      start,
 		End:        end,
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "OK",
 		TelegramID: "123",
 	}
@@ -27,15 +26,12 @@ func TestValidateBasic_OK(t *testing.T) {
 
 func TestValidateBasic_InvalidPeriod(t *testing.T) {
 	start := time.Now().Add(2 * time.Hour)
-	start = time.Date(start.Year(), start.Month(), start.Day(), 12, 0, 0, 0, time.Local)
-
-	// end раньше start, но оба в будущем => проверка "прошлое" не мешает
 	end := start.Add(-10 * time.Minute)
 
 	b := booking.Booking{
 		Start:      start,
 		End:        end,
-		Room:       booking.Room21,
+		Room:       21,
 		Title:      "Bad",
 		TelegramID: "123",
 	}
@@ -46,14 +42,16 @@ func TestValidateBasic_InvalidPeriod(t *testing.T) {
 	}
 }
 
-func TestValidateBasic_InvalidRoom(t *testing.T) {
+func TestValidateBasic_NoIdentifier(t *testing.T) {
+	start := time.Now().Add(2 * time.Hour)
 	b := booking.Booking{
-		Start: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-		End:   time.Date(2025, 1, 1, 11, 0, 0, 0, time.UTC),
-		Room:  999,
+		Start: start,
+		End:   start.Add(time.Hour),
+		Room:  21,
+		Title: "No owner",
 	}
 
-	if err := b.ValidateBasic(); !errors.Is(err, booking.ErrInvalidRoom) {
-		t.Fatalf("ожидали ErrInvalidRoom, получили %v", err)
+	if err := b.ValidateBasic(); !errors.Is(err, booking.ErrNoIdentifier) {
+		t.Fatalf("ожидали ErrNoIdentifier, получили %v", err)
 	}
 }

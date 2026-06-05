@@ -10,9 +10,14 @@ export function HoverHint({ hint, children }: { hint: string; children: React.Re
                 className={cn(
                     "pointer-events-none absolute left-1/2 -translate-x-1/2 top-full mt-1",
                     "z-50 rounded-xl px-2 py-1 text-xs",
-                    "bg-zinc-900 text-white shadow-lg transition-all duration-200",
+                    "shadow-lg transition-all duration-200",
                     open ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-1"
                 )}
+                style={{
+                    background: "var(--d-primary-dark, #266529)",
+                    color: "#fff",
+                    border: "1px solid var(--d-border)",
+                }}
             >
         {hint}
       </div>

@@ -13,4 +13,6 @@ var (
 	ErrPrivateDailyLimit   = errors.New("Превышен суточный лимит частных бронирований.")
 	ErrPrivateEveningLimit = errors.New("Превышен вечерний лимит частных бронирований.")
 	ErrTooLongDuration     = errors.New("Длительность бронирования превышает максимально допустимую.")
+	ErrNoIdentifier        = errors.New("Необходимо указать email или Telegram ID.")
+	ErrDailyUserLimit      = errors.New("Разрешена не более одной брони в день.")
 )

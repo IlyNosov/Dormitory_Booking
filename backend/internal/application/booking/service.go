@@ -1,219 +1,236 @@
 package booking
 
-// В этом файле лежит сервис для работы с бронированиями.
-// Его дергают HTTP-слой, телеграм-бот и всё остальное.
-// Здесь реализованы правила по времени, частным посиделкам, ограничениям по длительности и графику работы комнат.
-
 import (
 	"context"
 	"time"
 
 	domain "Dormitory_Booking/internal/domain/booking"
+	roomsvc "Dormitory_Booking/internal/application/room"
 )
 
+// UTC+3, FixedZone вместо LoadLocation чтобы не тащить tzdata в контейнер
+var mskLoc = time.FixedZone("MSK", 3*60*60)
+
+
 type Service struct {
-	repo domain.Repository
+	repo     domain.Repository
+	roomsSvc *roomsvc.Service
+	notifier Notifier
 }
 
-func NewService(repo domain.Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo domain.Repository, rooms *roomsvc.Service) *Service {
+	return &Service{repo: repo, roomsSvc: rooms}
 }
 
-// CreateBookingInput - данные от HTTP/бота/парсера для создания брони.
+func NewServiceWithNotifier(repo domain.Repository, rooms *roomsvc.Service, n Notifier) *Service {
+	return &Service{repo: repo, roomsSvc: rooms, notifier: n}
+}
+
 type CreateBookingInput struct {
-	Start       time.Time   // время начала брони
-	End         time.Time   // время конца брони
-	Room        domain.Room // комната
-	Title       string      // название события
-	Description string      // описание события
-	TelegramID  string      // кто бронирует (Telegram ID)
-	IsPrivate   bool        // частная посиделка или нет
+	Start       time.Time
+	End         time.Time
+	Room        int
+	Title       string
+	Description string
+	UserEmail   string
+	TelegramID  string
+	IsPrivate   bool
+	Force       bool // только для админа, обходит бизнес-правила
 }
 
-// ListBookings возвращает все брони.
 func (s *Service) ListBookings(ctx context.Context) ([]domain.Booking, error) {
 	return s.repo.List(ctx)
 }
 
-// GetBooking возвращает бронь по ID.
 func (s *Service) GetBooking(ctx context.Context, id string) (domain.Booking, error) {
 	return s.repo.Get(ctx, id)
 }
 
-// DeleteBooking - удалить бронь может только владелец или админ.
-func (s *Service) DeleteBooking(ctx context.Context, id string, requesterID string, isAdmin bool) error {
+type UpdateBookingInput struct {
+	ID          string
+	Start       time.Time
+	End         time.Time
+	Room        int
+	Title       string
+	Description string
+	TelegramID  string
+	IsPrivate   bool
+	Force       bool
+}
+
+func (s *Service) UpdateBooking(ctx context.Context, in UpdateBookingInput, requesterEmail string, isAdmin bool) (domain.Booking, error) {
+	existing, err := s.repo.Get(ctx, in.ID)
+	if err != nil {
+		return domain.Booking{}, err
+	}
+	if !isAdmin && existing.UserEmail != requesterEmail {
+		return domain.Booking{}, domain.ErrForbidden
+	}
+
+	updated := domain.Booking{
+		ID:          in.ID,
+		Start:       in.Start,
+		End:         in.End,
+		Room:        in.Room,
+		Title:       sanitize(in.Title),
+		Description: sanitize(in.Description),
+		UserEmail:   existing.UserEmail,
+		TelegramID:  in.TelegramID,
+		IsPrivate:   in.IsPrivate,
+	}
+
+	active, err := s.roomsSvc.IsActive(ctx, updated.Room)
+	if err != nil || !active {
+		return domain.Booking{}, domain.ErrInvalidRoom
+	}
+
+	if in.Force || isAdmin {
+		if err := updated.ValidateTimeOrder(); err != nil {
+			return domain.Booking{}, err
+		}
+	} else {
+		if err := updated.ValidateBasic(); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateDuration(updated); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateRoomSchedule(ctx, updated); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateUserDailyLimit(ctx, updated, in.ID); err != nil {
+			return domain.Booking{}, err
+		}
+	}
+
+	return s.repo.Update(ctx, updated)
+}
+
+func (s *Service) DeleteBooking(ctx context.Context, id, requesterEmail, requesterTG string, isAdmin bool) error {
 	b, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-
-	if !isAdmin && b.TelegramID != requesterID {
-		return domain.ErrForbidden
+	if !isAdmin {
+		ownsViaEmail := requesterEmail != "" && b.UserEmail == requesterEmail
+		ownsViaTG := requesterTG != "" && b.TelegramID == requesterTG
+		if !ownsViaEmail && !ownsViaTG {
+			return domain.ErrForbidden
+		}
 	}
-
-	return s.repo.Delete(ctx, id)
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return err
+	}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyDeletedBooking(ctx, b)
+	}
+	return nil
 }
 
-// CreateBooking создаёт новую бронь с учётом всех правил.
 func (s *Service) CreateBooking(ctx context.Context, in CreateBookingInput) (domain.Booking, error) {
 	b := domain.Booking{
 		Start:       in.Start,
 		End:         in.End,
 		Room:        in.Room,
-		Title:       in.Title,
-		Description: in.Description,
+		Title:       sanitize(in.Title),
+		Description: sanitize(in.Description),
+		UserEmail:   in.UserEmail,
 		TelegramID:  in.TelegramID,
 		IsPrivate:   in.IsPrivate,
 	}
 
-	if err := b.ValidateBasic(); err != nil {
-		return domain.Booking{}, err
+	// проверяем комнату всегда, даже при форс-пуше
+	active, err := s.roomsSvc.IsActive(ctx, b.Room)
+	if err != nil || !active {
+		return domain.Booking{}, domain.ErrInvalidRoom
 	}
 
-	// общие ограничения по длительности
-	if err := validateDuration(b); err != nil {
-		return domain.Booking{}, err
-	}
-
-	// ограничения по графику работы комнаты
-	if err := validateRoomSchedule(b); err != nil {
-		return domain.Booking{}, err
-	}
-
-	// частные посиделки: ночь, лимиты на день/вечер
-	if b.IsPrivate {
-		if err := s.validatePrivateRules(ctx, b); err != nil {
+	if in.Force {
+		// форс-пуш, только порядок времён
+		if err := b.ValidateTimeOrder(); err != nil {
 			return domain.Booking{}, err
+		}
+	} else {
+		if err := b.ValidateBasic(); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateDuration(b); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateRoomSchedule(ctx, b); err != nil {
+			return domain.Booking{}, err
+		}
+		if err := s.validateUserDailyLimit(ctx, b, ""); err != nil {
+			return domain.Booking{}, err
+		}
+		if b.IsPrivate {
+			if err := s.validatePrivateRules(ctx, b); err != nil {
+				return domain.Booking{}, err
+			}
 		}
 	}
 
-	// проверка пересечений по времени в той же комнате
-	existing, err := s.repo.List(ctx)
+	created, err := s.repo.Create(ctx, b)
 	if err != nil {
 		return domain.Booking{}, err
 	}
-	for _, e := range existing {
-		if e.Room != b.Room {
-			continue
-		}
-		if timesOverlap(b.Start, b.End, e.Start, e.End) {
-			return domain.Booking{}, domain.ErrOverlap
-		}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyNewBooking(ctx, created)
 	}
-
-	return s.repo.Create(ctx, b)
+	return created, nil
 }
 
-// timesOverlap проверяет пересечение двух временных интервалов.
-func timesOverlap(s1, e1, s2, e2 time.Time) bool {
-	return s1.Before(e2) && e1.After(s2)
-}
+const maxBookingDuration = 4 * time.Hour
 
-// Ограничения по длительности брони.
-
-const maxBookingDuration = 3 * time.Hour
-
-func validateDuration(b domain.Booking) error {
-
-	// Лимит 3 часа только на приватные
-
+func (s *Service) validateDuration(b domain.Booking) error {
 	dur := b.End.Sub(b.Start)
 	if dur <= 0 {
 		return domain.ErrInvalidPeriod
 	}
-
-	if b.IsPrivate && dur > maxBookingDuration {
+	if dur > maxBookingDuration {
 		return domain.ErrTooLongDuration
 	}
 	return nil
 }
 
-// График работы комнат.
-
-// Для удобства храним часы работы в виде смещений от полуночи.
-// Закрытие может быть позже 23:59 (например, 25:00 = 01:00 следующего дня).
-type roomSchedule struct {
-	WeekdayOpen  int // часы с 0 до 24
-	WeekdayClose int
-	FriSatOpen   int
-	FriSatClose  int
-	SunOpen      int
-	SunClose     int
-}
-
-var roomSchedules = map[domain.Room]roomSchedule{
-	domain.Room21: {
-		WeekdayOpen: 6, WeekdayClose: 23,
-		FriSatOpen: 6, FriSatClose: 25, // до 01:00
-		SunOpen: 6, SunClose: 23,
-	},
-	domain.Room256: {
-		WeekdayOpen: 6, WeekdayClose: 23,
-		FriSatOpen: 6, FriSatClose: 25,
-		SunOpen: 6, SunClose: 23,
-	},
-	domain.Room132: {
-		WeekdayOpen: 6, WeekdayClose: 22,
-		FriSatOpen: 6, FriSatClose: 23,
-		SunOpen: 6, SunClose: 22,
-	},
-}
-
-// validateRoomSchedule проверяет, что бронь целиком укладывается в разрешённые часы работы комнаты.
-func validateRoomSchedule(b domain.Booking) error {
-	sched, ok := roomSchedules[b.Room]
-	if !ok {
+func (s *Service) validateRoomSchedule(ctx context.Context, b domain.Booking) error {
+	rm, err := s.roomsSvc.GetSchedule(ctx, b.Room)
+	if err != nil {
 		return domain.ErrInvalidRoom
 	}
 
-	loc := b.Start.Location()
+	// расписание всегда проверяем по московскому времени
+	loc := mskLoc
 	startLocal := b.Start.In(loc)
 	endLocal := b.End.In(loc)
-
 	dayStart := time.Date(startLocal.Year(), startLocal.Month(), startLocal.Day(), 0, 0, 0, 0, loc)
-	var openHour, closeHour int
 
+	var openHour, closeHour int
 	switch startLocal.Weekday() {
 	case time.Friday, time.Saturday:
-		openHour = sched.FriSatOpen
-		closeHour = sched.FriSatClose
+		openHour, closeHour = rm.FriSatOpen, rm.FriSatClose
 	case time.Sunday:
-		openHour = sched.SunOpen
-		closeHour = sched.SunClose
+		openHour, closeHour = rm.SunOpen, rm.SunClose
 	default:
-		openHour = sched.WeekdayOpen
-		closeHour = sched.WeekdayClose
+		openHour, closeHour = rm.WeekdayOpen, rm.WeekdayClose
 	}
 
 	openTime := dayStart.Add(time.Duration(openHour) * time.Hour)
-	closeTime := dayStart.Add(time.Duration(closeHour) * time.Hour) // может быть > 24ч (до 01:00)
+	closeTime := dayStart.Add(time.Duration(closeHour) * time.Hour)
 
 	if startLocal.Before(openTime) || endLocal.After(closeTime) {
 		return domain.ErrInvalidTime
 	}
-
-	now := time.Now().In(loc)
-	if startLocal.Before(now) {
+	if startLocal.Before(time.Now().In(mskLoc)) {
 		return domain.ErrInPast
 	}
-
 	return nil
 }
 
-// "Частные посиделки" (ЧП)
-
-// validatePrivateRules проверяет ночь, лимит ЧП в день и лимит вечерних ЧП.
 func (s *Service) validatePrivateRules(ctx context.Context, b domain.Booking) error {
-	loc := b.Start.Location()
+	loc := mskLoc
 	startLocal := b.Start.In(loc)
-	endLocal := b.End.In(loc)
 
-	// Нет ЧП в ночь с пятницы на субботу и с субботы на воскресенье в 23:00–06:00.
-	if overlapsForbiddenPrivateNight(startLocal, endLocal) {
-		return domain.ErrInvalidTime
-	}
-
-	// Не более 3 ЧП в день, не более одной ЧП после 18:00 по комнате.
 	existing, err := s.repo.List(ctx)
 	if err != nil {
 		return err
@@ -227,7 +244,6 @@ func (s *Service) validatePrivateRules(ctx context.Context, b domain.Booking) er
 		if !e.IsPrivate || e.Room != b.Room {
 			continue
 		}
-
 		eLocal := e.Start.In(loc)
 		y, m, d := eLocal.Date()
 		if y == dayY && m == dayM && d == dayD {
@@ -241,33 +257,55 @@ func (s *Service) validatePrivateRules(ctx context.Context, b domain.Booking) er
 	if privateCountDay >= 3 {
 		return domain.ErrPrivateDailyLimit
 	}
-
 	if startLocal.Hour() >= 18 && privateEveningCount >= 1 {
 		return domain.ErrPrivateEveningLimit
 	}
-
 	return nil
 }
 
-// overlapsForbiddenPrivateNight проверяет, пересекает ли бронь ночные интервалы.
-func overlapsForbiddenPrivateNight(start, end time.Time) bool {
-	loc := start.Location()
-	dayStart := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
-	dayEnd := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, loc)
-
-	for day := dayStart.Add(-24 * time.Hour); !day.After(dayEnd.Add(24 * time.Hour)); day = day.Add(24 * time.Hour) {
-		wd := day.Weekday()
-		if wd != time.Friday && wd != time.Saturday {
-			continue
-		}
-
-		nightStart := time.Date(day.Year(), day.Month(), day.Day(), 23, 0, 0, 0, loc)
-		nightEnd := nightStart.Add(7 * time.Hour) // до 06:00 следующего дня
-
-		if timesOverlap(start, end, nightStart, nightEnd) {
-			return true
-		}
+func (s *Service) validateUserDailyLimit(ctx context.Context, b domain.Booking, excludeID string) error {
+	existing, err := s.repo.List(ctx)
+	if err != nil {
+		return err
 	}
 
-	return false
+	loc := mskLoc
+	dayY, dayM, dayD := b.Start.In(loc).Date()
+
+	for _, e := range existing {
+		if e.ID == excludeID {
+			continue
+		}
+		ey, em, ed := e.Start.In(loc).Date()
+		if ey != dayY || em != dayM || ed != dayD {
+			continue
+		}
+		sameUser := (b.UserEmail != "" && e.UserEmail == b.UserEmail) ||
+			(b.TelegramID != "" && e.TelegramID == b.TelegramID)
+		if sameUser {
+			return domain.ErrDailyUserLimit
+		}
+	}
+	return nil
+}
+
+// вырезает HTML-теги для защиты от XSS
+func sanitize(s string) string {
+	var result []rune
+	inTag := false
+	for _, c := range s {
+		switch {
+		case c == '<':
+			inTag = true
+		case c == '>':
+			inTag = false
+		case !inTag:
+			result = append(result, c)
+		}
+	}
+	r := []rune(string(result))
+	if len(r) > 512 {
+		r = r[:512]
+	}
+	return string(r)
 }
